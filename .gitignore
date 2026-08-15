@@ -1,0 +1,14 @@
+# Secretos y entorno local
+.env
+
+# Binarios / cache de Go
+*.exe
+*.test
+*.out
+vendor/
+
+# IDE / sistema
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

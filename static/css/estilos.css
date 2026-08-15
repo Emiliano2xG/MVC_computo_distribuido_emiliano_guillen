@@ -1,0 +1,145 @@
+:root {
+    --bg: #f4f7fb;
+    --surface: #ffffff;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --accent: #388256;
+    --border: #e5e7eb;
+    --shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+.fondo {
+    min-height: 100vh;
+    margin: 0;
+    padding: 48px 20px;
+    font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--text);
+    background:
+        radial-gradient(circle at top, #e8eefc 0%, transparent 45%),
+        var(--bg);
+}
+
+.titulo {
+    margin: 0;
+    font-size: 2.25rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    text-align: center;
+    color: var(--text);
+}
+
+.subtitulo {
+    margin: 4px 0 16px;
+    font-size: 1.05rem;
+    font-weight: 400;
+    text-align: center;
+    color: var(--muted);
+}
+
+.lista {
+    width: 100%;
+    max-width: 420px;
+    margin: 0 auto;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.55);
+    border: 1px solid rgba(229, 231, 235, 0.7);
+    border-radius: 16px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+    backdrop-filter: blur(8px);
+}
+
+.lista-items {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.lista-items li {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0;
+    padding: 14px 16px;
+    border-radius: 12px;
+    color: var(--text);
+    font-size: 1rem;
+    font-weight: 500;
+    transition: background-color 0.2s ease;
+}
+
+.lista-items li:hover {
+    background-color: #f8fafc;
+}
+
+.checkbox {
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.form-completar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    margin: 0;
+}
+
+.lista-items li:has(.checkbox:checked) {
+    color: var(--muted);
+    text-decoration: line-through;
+}
+
+.formulario {
+    display: flex;
+    gap: 10px;
+    margin-top: 8px;
+    padding: 12px 8px 8px;
+    border-top: 1px solid var(--border);
+}
+
+.input-tarea {
+    flex: 1;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 0.95rem;
+    font-family: inherit;
+    color: var(--text);
+    background: #f8fafc;
+    outline: none;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.input-tarea:focus {
+    border-color: var(--accent);
+    background: #ffffff;
+    box-shadow: 0 0 0 3px rgba(56, 130, 86, 0.15);
+}
+
+.boton-enviar {
+    padding: 12px 18px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #ffffff;
+    font-size: 0.95rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background-color 0.2s ease, transform 0.15s ease;
+}
+
+.boton-enviar:hover {
+    background: #2f6b47;
+}
+
+.boton-enviar:active {
+    transform: scale(0.98);
+}

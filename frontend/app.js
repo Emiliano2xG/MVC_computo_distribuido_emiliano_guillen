@@ -187,8 +187,10 @@ function pintarCalendario(inscritas) {
                     caja.innerHTML = "<strong>" + clase.clave + "</strong>" + clase.materia +
                         "<br>" + clase.horario;
                     const boton = document.createElement("button");
+                    boton.type = "button";
                     boton.textContent = "Baja";
-                    boton.onclick = function () {
+                    boton.onclick = function (ev) {
+                        ev.stopPropagation();
                         darDeBaja(clase.id);
                     };
                     caja.appendChild(boton);
@@ -212,14 +214,19 @@ function pintarFilaMateria(materia, idsInscritos, idsCursadas) {
 
     if (idsCursadas[materia.id]) {
         const ok = document.createElement("button");
+        ok.type = "button";
         ok.className = "lleno cursada";
         ok.textContent = "Cursada";
         fila.appendChild(ok);
     } else if (idsInscritos[materia.id]) {
-        const ok = document.createElement("button");
-        ok.className = "lleno";
-        ok.textContent = "Inscrita";
-        fila.appendChild(ok);
+        const boton = document.createElement("button");
+        boton.type = "button";
+        boton.className = "baja";
+        boton.textContent = "Baja";
+        boton.onclick = function () {
+            darDeBaja(idsInscritos[materia.id]);
+        };
+        fila.appendChild(boton);
     } else if (lugares <= 0) {
         const lleno = document.createElement("button");
         lleno.className = "lleno";
@@ -244,7 +251,7 @@ function pintarMaterias(materias, inscritas) {
         if (fila.estado === "cursada") {
             idsCursadas[fila.materia_id] = true;
         } else {
-            idsInscritos[fila.materia_id] = true;
+            idsInscritos[fila.materia_id] = fila.id;
         }
     });
 

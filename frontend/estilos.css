@@ -718,6 +718,7 @@ body.en-login .login-bg {
 }
 
 button.alta,
+button.baja,
 button.lleno {
     flex-shrink: 0;
     border: 0;
@@ -738,6 +739,18 @@ button.alta:hover {
     background: #3a2a1b;
 }
 
+button.baja {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--bark);
+    cursor: pointer;
+}
+
+button.baja:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
 button.lleno {
     background: var(--linen);
     color: var(--stone);
@@ -753,6 +766,7 @@ button.cursada {
 .nav-btn:focus-visible,
 .alumno-box button:focus-visible,
 .vacio button:focus-visible,
+button.baja:focus-visible,
 button.alta:focus-visible {
     outline: 2px solid var(--terracotta);
     outline-offset: 2px;

@@ -1,0 +1,26 @@
+[
+  {
+    "prefix": "/materias",
+    "targets": [
+      "http://servicio_materias_1:8080",
+      "http://servicio_materias_2:8080",
+      "http://servicio_materias_3:8080"
+    ]
+  },
+  {
+    "prefix": "/alumnos",
+    "targets": [
+      "http://servicio_alumnos_1:8080",
+      "http://servicio_alumnos_2:8080",
+      "http://servicio_alumnos_3:8080"
+    ]
+  },
+  {
+    "prefix": "/inscripciones",
+    "targets": [
+      "http://servicio_inscripciones_1:8080",
+      "http://servicio_inscripciones_2:8080",
+      "http://servicio_inscripciones_3:8080"
+    ]
+  }
+]

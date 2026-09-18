@@ -12,3 +12,6 @@ vendor/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Carpeta vacía reservada
+loadbalancer/

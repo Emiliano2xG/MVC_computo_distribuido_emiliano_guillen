@@ -1,64 +1,160 @@
+# Arranque del proyecto (Windows, Mac o Linux):
+#   docker compose up --build
+# Frente: http://localhost:3000
+# MLB:    http://localhost:8000
+# Parar:  docker compose down
+
 services:
   base_de_datos:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: tareas_db
+      POSTGRES_DB: horarios_db
     volumes:
       - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
-      - datos_postgres:/var/lib/postgresql/data
+      - datos_horarios:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d tareas_db"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d horarios_db"]
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - horarios-net
 
-  worker_vistas:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    environment:
-      NOMBRE_WORKER: vistas
-      PORT: 8080
+  servicio_materias_1:
+    build: ./servicios/materias
+    environment: &env_db
       DB_USER: postgres
       DB_PASSWORD: postgres
-      DB_NAME: tareas_db
+      DB_NAME: horarios_db
       DB_HOST: base_de_datos
-      DB_PORT: 5432
+      DB_PORT: "5432"
+      INSTANCE_ID: materias-1
     depends_on:
       base_de_datos:
         condition: service_healthy
+    networks:
+      - horarios-net
 
-  worker_tareas:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
+  servicio_materias_2:
+    build: ./servicios/materias
     environment:
-      NOMBRE_WORKER: tareas
-      PORT: 8080
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-      DB_NAME: tareas_db
-      DB_HOST: base_de_datos
-      DB_PORT: 5432
+      <<: *env_db
+      INSTANCE_ID: materias-2
     depends_on:
       base_de_datos:
         condition: service_healthy
+    networks:
+      - horarios-net
 
-  middleware:
-    build:
-      context: .
-      dockerfile: Dockerfile.middleware
+  servicio_materias_3:
+    build: ./servicios/materias
     environment:
-      PORT: 8080
-      WORKER_VISTAS: http://worker_vistas:8080
-      WORKER_TAREAS: http://worker_tareas:8080
+      <<: *env_db
+      INSTANCE_ID: materias-3
+    depends_on:
+      base_de_datos:
+        condition: service_healthy
+    networks:
+      - horarios-net
+
+  servicio_alumnos_1:
+    build: ./servicios/alumnos
+    environment:
+      <<: *env_db
+      INSTANCE_ID: alumnos-1
+    depends_on:
+      base_de_datos:
+        condition: service_healthy
+    networks:
+      - horarios-net
+
+  servicio_alumnos_2:
+    build: ./servicios/alumnos
+    environment:
+      <<: *env_db
+      INSTANCE_ID: alumnos-2
+    depends_on:
+      base_de_datos:
+        condition: service_healthy
+    networks:
+      - horarios-net
+
+  servicio_alumnos_3:
+    build: ./servicios/alumnos
+    environment:
+      <<: *env_db
+      INSTANCE_ID: alumnos-3
+    depends_on:
+      base_de_datos:
+        condition: service_healthy
+    networks:
+      - horarios-net
+
+  servicio_inscripciones_1:
+    build: ./servicios/inscripciones
+    environment:
+      <<: *env_db
+      INSTANCE_ID: inscripciones-1
+    depends_on:
+      base_de_datos:
+        condition: service_healthy
+    networks:
+      - horarios-net
+
+  servicio_inscripciones_2:
+    build: ./servicios/inscripciones
+    environment:
+      <<: *env_db
+      INSTANCE_ID: inscripciones-2
+    depends_on:
+      base_de_datos:
+        condition: service_healthy
+    networks:
+      - horarios-net
+
+  servicio_inscripciones_3:
+    build: ./servicios/inscripciones
+    environment:
+      <<: *env_db
+      INSTANCE_ID: inscripciones-3
+    depends_on:
+      base_de_datos:
+        condition: service_healthy
+    networks:
+      - horarios-net
+
+  mlb:
+    build: ./mlb
+    container_name: mlb
     ports:
-      - "8080:8080"
+      - "8000:8000"
     depends_on:
-      - worker_vistas
-      - worker_tareas
+      - servicio_materias_1
+      - servicio_materias_2
+      - servicio_materias_3
+      - servicio_alumnos_1
+      - servicio_alumnos_2
+      - servicio_alumnos_3
+      - servicio_inscripciones_1
+      - servicio_inscripciones_2
+      - servicio_inscripciones_3
+    networks:
+      - horarios-net
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - mlb
+    networks:
+      - horarios-net
+
+networks:
+  horarios-net:
+    driver: bridge
 
 volumes:
-  datos_postgres:
+  datos_horarios:

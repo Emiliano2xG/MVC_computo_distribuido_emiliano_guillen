@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Horario UP</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;1,500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="estilos.css">
+</head>
+<body class="en-login">
+    <div class="login-bg" aria-hidden="true">
+        <img src="brand/campus.jpg" alt="">
+    </div>
+    <div id="pantalla-login" class="login-screen">
+        <article class="login-card">
+            <img class="login-logo" src="brand/up-roble.png" alt="Universidad Panamericana">
+            <p class="login-kicker">Universidad Panamericana</p>
+            <p class="login-meta">Cómputo distribuido</p>
+            <h1 class="login-title">Armar horario</h1>
+            <p class="login-sub">Ingresa con tu correo institucional @up.edu.mx</p>
+
+            <div class="login-tabs" role="tablist" aria-label="Acceso">
+                <button type="button" class="login-tab is-active" data-tab="entrar" role="tab" aria-selected="true">Iniciar sesión</button>
+                <button type="button" class="login-tab" data-tab="registro" role="tab" aria-selected="false">Crear cuenta</button>
+            </div>
+
+            <form id="form-login" class="login-form">
+                <label class="campo">
+                    <span>Correo institucional</span>
+                    <input id="login-correo" type="email" placeholder="0250947@up.edu.mx" autocomplete="username" required>
+                </label>
+                <label class="campo">
+                    <span>Contraseña</span>
+                    <input id="login-password" type="password" placeholder="Tu contraseña" autocomplete="current-password" required>
+                </label>
+                <p id="error-login" class="error" role="alert"></p>
+                <button type="submit" class="btn-primary">Entrar</button>
+            </form>
+
+            <form id="form-nuevo" class="login-form" hidden>
+                <label class="campo">
+                    <span>Nombre</span>
+                    <input id="nuevo-nombre" type="text" placeholder="Nombre completo" autocomplete="name" required>
+                </label>
+                <label class="campo">
+                    <span>Correo institucional</span>
+                    <input id="nuevo-correo" type="email" placeholder="matricula@up.edu.mx" autocomplete="email" required>
+                </label>
+                <label class="campo">
+                    <span>Contraseña</span>
+                    <input id="nuevo-password" type="password" placeholder="Crea una contraseña" autocomplete="new-password" required>
+                </label>
+                <label class="campo">
+                    <span>Carrera</span>
+                    <select id="nuevo-carrera" required></select>
+                </label>
+                <p id="error-registro" class="error" role="alert"></p>
+                <button type="submit" class="btn-primary">Registrarme</button>
+            </form>
+
+            <details class="login-demos">
+                <summary>Cuentas de prueba</summary>
+                <ul>
+                    <li><strong>0250947@up.edu.mx</strong> / emilianoguillen90<br>Inteligencia de Datos y Ciberseguridad</li>
+                    <li><strong>0251001@up.edu.mx</strong> / marianalopez90<br>Mecatrónica</li>
+                    <li><strong>0251002@up.edu.mx</strong> / diegoramirez90<br>Ingeniería Industrial</li>
+                    <li><strong>0251003@up.edu.mx</strong> / anatorres90<br>Ingeniería Mecánica</li>
+                </ul>
+            </details>
+        </article>
+    </div>
+
+    <div id="app" class="app" hidden>
+        <header class="topbar">
+            <div class="marca-box">
+                <img class="marca-logo" src="brand/up-roble.png" alt="">
+                <div>
+                    <p class="marca">Universidad Panamericana</p>
+                    <h1>Armar horario</h1>
+                </div>
+            </div>
+            <nav class="app-nav" aria-label="Apartados">
+                <button type="button" class="nav-btn is-active" data-nav="horario">Mi horario</button>
+                <button type="button" class="nav-btn" data-nav="materias">Agregar materias</button>
+            </nav>
+            <div class="alumno-box">
+                <p id="nombre-alumno" class="alumno"></p>
+                <button id="btn-cambiar" type="button">Cerrar sesión</button>
+                <p id="carrera-alumno" class="carrera"></p>
+            </div>
+        </header>
+
+        <main class="app-main">
+            <p id="mensaje" class="mensaje"></p>
+
+            <section id="vista-horario" class="vista" data-vista="horario">
+                <div class="vista-head">
+                    <p class="vista-kicker">Esta semana</p>
+                    <div class="vista-title-row">
+                        <h2>Mi horario</h2>
+                        <p id="resumen-horario" class="resumen"></p>
+                    </div>
+                    <p class="ayuda">Tus clases de lunes a viernes. Da de baja una materia desde su bloque.</p>
+                </div>
+                <div class="calendario-wrap">
+                    <div id="calendario" class="calendario">Cargando horario...</div>
+                </div>
+            </section>
+
+            <section id="vista-materias" class="vista" data-vista="materias" hidden>
+                <div class="vista-head">
+                    <p class="vista-kicker">Catálogo</p>
+                    <h2>Agregar materias</h2>
+                    <p id="titulo-catalogo" class="ayuda">Solo ves las de tu plan. El tronco común se comparte con otras ingenierías.</p>
+                </div>
+                <div id="lista-materias" class="catalogo">Cargando...</div>
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

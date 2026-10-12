@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Continue"
+﻿$ErrorActionPreference = "Continue"
 $api = "http://localhost:8000"
 $ok = 0
 $fail = 0
@@ -17,13 +17,12 @@ Write-Host "=== Pruebas horarios UP ==="
 
 try {
     $hb = (Invoke-WebRequest "$api/heartbeat" -UseBasicParsing).Content
-    if ("$hb" -match "alive") { Pass "MLB heartbeat" } else { Fail "heartbeat: $hb" }
-} catch { Fail "MLB no responde. Corre docker compose up" }
+    if ("$hb" -match "alive") { Pass "Gateway nginx heartbeat" } else { Fail "heartbeat: $hb" }
+} catch { Fail "Gateway no responde. Corre docker compose up" }
 
 try {
-    $status = (Invoke-WebRequest "$api/status" -UseBasicParsing).Content | ConvertFrom-Json
-    $m = $status.'/materias' | Where-Object { $_.healthy }
-    if ($m.Count -ge 2) { Pass "status con replicas sanas" } else { Fail "status incompleto" }
+    $status = (Invoke-WebRequest "$api/status" -UseBasicParsing).Content
+    if ("$status" -match "Active connections") { Pass "status de nginx (stub_status)" } else { Fail "status inesperado: $status" }
 } catch { Fail "status" }
 
 try {

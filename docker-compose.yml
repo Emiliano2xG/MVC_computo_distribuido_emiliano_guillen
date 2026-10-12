@@ -1,7 +1,7 @@
 # Arranque del proyecto (Windows, Mac o Linux):
 #   docker compose up --build
 # Frente: http://localhost:3000
-# MLB:    http://localhost:8000
+# Gateway nginx (load balancer): http://localhost:8000
 # Parar:  docker compose down
 
 services:
@@ -125,11 +125,17 @@ services:
     networks:
       - horarios-net
 
-  mlb:
-    build: ./mlb
-    container_name: mlb
+  # Reverse proxy / gateway + load balancer (nginx) entre frontend y backends
+  load_balancer:
+    build: ./load_balancer
+    container_name: load_balancer
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/heartbeat | grep -q alive"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     depends_on:
       - servicio_materias_1
       - servicio_materias_2
@@ -148,7 +154,7 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - mlb
+      - load_balancer
     networks:
       - horarios-net
 

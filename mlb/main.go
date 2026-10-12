@@ -13,29 +13,21 @@ import (
 	"time"
 )
 
-// RouteConfig is one entry from routes.json: a path prefix mapped to a pool
-// of backend URLs. This is our "static service discovery" - no registry,
-// just a file read at startup.
 type RouteConfig struct {
 	Prefix  string   `json:"prefix"`
 	Targets []string `json:"targets"`
 }
 
-// Backend is one instance behind a route. healthy is an atomic bool so the
-// heartbeat monitor (writer) and the request path (reader) can touch it
-// concurrently without a mutex.
 type Backend struct {
 	URL     *url.URL
 	Proxy   *httputil.ReverseProxy
 	healthy atomic.Bool
 }
 
-// RouteGroup is a prefix plus its pool of backends and the state needed to
-// round-robin across them.
 type RouteGroup struct {
 	Prefix   string
 	Backends []*Backend
-	counter  uint64 // atomic; next index = counter % len(Backends)
+	counter  uint64 
 }
 
 func (rg *RouteGroup) next() *Backend {
@@ -50,7 +42,6 @@ func (rg *RouteGroup) next() *Backend {
 	return nil
 }
 
-// Gateway is the MLB: routing + load balancing in one place.
 type Gateway struct {
 	groups []*RouteGroup
 	sem    chan struct{}

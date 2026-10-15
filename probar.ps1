@@ -25,6 +25,28 @@ try {
     if ("$status" -match "Active connections") { Pass "status de nginx (stub_status)" } else { Fail "status inesperado: $status" }
 } catch { Fail "status" }
 
+function ConsulPassing($name) {
+    $uri = "http://localhost:8500/v1/health/service/{0}?passing=true" -f $name
+    $items = (Invoke-WebRequest $uri -UseBasicParsing).Content | ConvertFrom-Json
+    return @($items).Count
+}
+
+try {
+    $leader = (Invoke-WebRequest "http://localhost:8500/v1/status/leader" -UseBasicParsing).Content
+    if ("$leader" -match "\d") { Pass "Consul API responde" } else { Fail "Consul leader vacio: $leader" }
+} catch { Fail "Consul no responde en :8500. Corre docker compose up" }
+
+try {
+    $nm = ConsulPassing "materias"
+    $na = ConsulPassing "alumnos"
+    $ni = ConsulPassing "inscripciones"
+    if ($nm -eq 3 -and $na -eq 3 -and $ni -eq 3) {
+        Pass "Consul registry: 3 materias + 3 alumnos + 3 inscripciones (healthy)"
+    } else {
+        Fail "Consul registry materias=$nm alumnos=$na inscripciones=$ni"
+    }
+} catch { Fail "Consul catalogo: $($_.Exception.Message)" }
+
 try {
     $front = (Invoke-WebRequest "http://localhost:3000" -UseBasicParsing).StatusCode
     if ($front -eq 200) { Pass "frontend 200" } else { Fail "frontend $front" }
@@ -224,6 +246,10 @@ if (-not $replica) {
 } else {
 docker stop $replica | Out-Null
 Start-Sleep -Seconds 6
+try {
+    $left = ConsulPassing "materias"
+    if ($left -eq 2) { Pass "Consul saco la replica caida (materias healthy=$left)" } else { Fail "Consul materias healthy=$left (se esperaban 2)" }
+} catch { Fail "Consul no mostro la baja de la replica" }
 try {
     $r = Invoke-WebRequest "$api/materias" -UseBasicParsing
     $inst = $r.Headers["X-Instance-Id"]

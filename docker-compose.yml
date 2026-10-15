@@ -2,9 +2,26 @@
 #   docker compose up --build
 # Frente: http://localhost:3000
 # Gateway nginx (load balancer): http://localhost:8000
+# Consul UI (service discovery): http://localhost:8500
 # Parar:  docker compose down
 
 services:
+  consul:
+    image: hashicorp/consul:1.20
+    container_name: consul
+    command: agent -dev -client=0.0.0.0 -ui
+    environment:
+      CONSUL_BIND_INTERFACE: eth0
+    ports:
+      - "8500:8500"
+    healthcheck:
+      test: ["CMD", "consul", "info"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - horarios-net
+
   base_de_datos:
     image: postgres:16-alpine
     environment:
@@ -23,112 +40,170 @@ services:
       - horarios-net
 
   servicio_materias_1:
-    build: ./servicios/materias
-    environment: &env_db
+    build:
+      context: ./servicios
+      dockerfile: materias/Dockerfile
+    hostname: materias-1
+    environment: &env_backend
       DB_USER: postgres
       DB_PASSWORD: postgres
       DB_NAME: horarios_db
       DB_HOST: base_de_datos
       DB_PORT: "5432"
+      CONSUL_HTTP_ADDR: consul:8500
       INSTANCE_ID: materias-1
+      SERVICE_ADDRESS: servicio_materias_1
     depends_on:
       base_de_datos:
+        condition: service_healthy
+      consul:
         condition: service_healthy
     networks:
       - horarios-net
 
   servicio_materias_2:
-    build: ./servicios/materias
+    build:
+      context: ./servicios
+      dockerfile: materias/Dockerfile
+    hostname: materias-2
     environment:
-      <<: *env_db
+      <<: *env_backend
       INSTANCE_ID: materias-2
+      SERVICE_ADDRESS: servicio_materias_2
     depends_on:
       base_de_datos:
+        condition: service_healthy
+      consul:
         condition: service_healthy
     networks:
       - horarios-net
 
   servicio_materias_3:
-    build: ./servicios/materias
+    build:
+      context: ./servicios
+      dockerfile: materias/Dockerfile
+    hostname: materias-3
     environment:
-      <<: *env_db
+      <<: *env_backend
       INSTANCE_ID: materias-3
+      SERVICE_ADDRESS: servicio_materias_3
     depends_on:
       base_de_datos:
+        condition: service_healthy
+      consul:
         condition: service_healthy
     networks:
       - horarios-net
 
   servicio_alumnos_1:
-    build: ./servicios/alumnos
+    build:
+      context: ./servicios
+      dockerfile: alumnos/Dockerfile
+    hostname: alumnos-1
     environment:
-      <<: *env_db
+      <<: *env_backend
       INSTANCE_ID: alumnos-1
+      SERVICE_ADDRESS: servicio_alumnos_1
     depends_on:
       base_de_datos:
+        condition: service_healthy
+      consul:
         condition: service_healthy
     networks:
       - horarios-net
 
   servicio_alumnos_2:
-    build: ./servicios/alumnos
+    build:
+      context: ./servicios
+      dockerfile: alumnos/Dockerfile
+    hostname: alumnos-2
     environment:
-      <<: *env_db
+      <<: *env_backend
       INSTANCE_ID: alumnos-2
+      SERVICE_ADDRESS: servicio_alumnos_2
     depends_on:
       base_de_datos:
+        condition: service_healthy
+      consul:
         condition: service_healthy
     networks:
       - horarios-net
 
   servicio_alumnos_3:
-    build: ./servicios/alumnos
+    build:
+      context: ./servicios
+      dockerfile: alumnos/Dockerfile
+    hostname: alumnos-3
     environment:
-      <<: *env_db
+      <<: *env_backend
       INSTANCE_ID: alumnos-3
+      SERVICE_ADDRESS: servicio_alumnos_3
     depends_on:
       base_de_datos:
+        condition: service_healthy
+      consul:
         condition: service_healthy
     networks:
       - horarios-net
 
   servicio_inscripciones_1:
-    build: ./servicios/inscripciones
+    build:
+      context: ./servicios
+      dockerfile: inscripciones/Dockerfile
+    hostname: inscripciones-1
     environment:
-      <<: *env_db
+      <<: *env_backend
       INSTANCE_ID: inscripciones-1
+      SERVICE_ADDRESS: servicio_inscripciones_1
     depends_on:
       base_de_datos:
+        condition: service_healthy
+      consul:
         condition: service_healthy
     networks:
       - horarios-net
 
   servicio_inscripciones_2:
-    build: ./servicios/inscripciones
+    build:
+      context: ./servicios
+      dockerfile: inscripciones/Dockerfile
+    hostname: inscripciones-2
     environment:
-      <<: *env_db
+      <<: *env_backend
       INSTANCE_ID: inscripciones-2
+      SERVICE_ADDRESS: servicio_inscripciones_2
     depends_on:
       base_de_datos:
+        condition: service_healthy
+      consul:
         condition: service_healthy
     networks:
       - horarios-net
 
   servicio_inscripciones_3:
-    build: ./servicios/inscripciones
+    build:
+      context: ./servicios
+      dockerfile: inscripciones/Dockerfile
+    hostname: inscripciones-3
     environment:
-      <<: *env_db
+      <<: *env_backend
       INSTANCE_ID: inscripciones-3
+      SERVICE_ADDRESS: servicio_inscripciones_3
     depends_on:
       base_de_datos:
+        condition: service_healthy
+      consul:
         condition: service_healthy
     networks:
       - horarios-net
 
-  # Reverse proxy / gateway + load balancer (nginx) entre frontend y backends
+  # Reverse proxy / gateway + load balancer (nginx) entre frontend y backends.
+  # Los upstreams salen del catalogo de Consul (consul-template), no estan fijos.
   load_balancer:
     build: ./load_balancer
     container_name: load_balancer
+    environment:
+      CONSUL_HTTP_ADDR: consul:8500
     ports:
       - "8000:8000"
     healthcheck:
@@ -137,15 +212,26 @@ services:
       timeout: 3s
       retries: 10
     depends_on:
-      - servicio_materias_1
-      - servicio_materias_2
-      - servicio_materias_3
-      - servicio_alumnos_1
-      - servicio_alumnos_2
-      - servicio_alumnos_3
-      - servicio_inscripciones_1
-      - servicio_inscripciones_2
-      - servicio_inscripciones_3
+      consul:
+        condition: service_healthy
+      servicio_materias_1:
+        condition: service_started
+      servicio_materias_2:
+        condition: service_started
+      servicio_materias_3:
+        condition: service_started
+      servicio_alumnos_1:
+        condition: service_started
+      servicio_alumnos_2:
+        condition: service_started
+      servicio_alumnos_3:
+        condition: service_started
+      servicio_inscripciones_1:
+        condition: service_started
+      servicio_inscripciones_2:
+        condition: service_started
+      servicio_inscripciones_3:
+        condition: service_started
     networks:
       - horarios-net
 

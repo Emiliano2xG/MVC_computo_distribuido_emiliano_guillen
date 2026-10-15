@@ -11,6 +11,8 @@ import (
 	"alumnos/controllers"
 	"alumnos/models"
 
+	"horarios/discovery"
+
 	_ "github.com/lib/pq"
 )
 
@@ -68,7 +70,10 @@ func main() {
 	mux.HandleFunc("/alumnos", withInstanceHeader(alumnoController.AlumnosHandler))
 	mux.HandleFunc("/alumnos/", withInstanceHeader(alumnoController.AlumnoByIDHandler))
 	mux.HandleFunc("/heartbeat", withInstanceHeader(heartbeatHandler))
+	mux.HandleFunc("/health", withInstanceHeader(discovery.HealthHandler(db.Ping)))
 
 	log.Printf("backend %s listening on :8080", instanceID)
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	if err := discovery.ListenAndServe(":8080", "alumnos", mux); err != nil {
+		log.Fatal(err)
+	}
 }

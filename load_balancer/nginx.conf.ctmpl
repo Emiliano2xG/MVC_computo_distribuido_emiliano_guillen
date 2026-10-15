@@ -1,8 +1,10 @@
 # Reverse proxy / API gateway + load balancer (nginx)
-# Corre en su propio contenedor, entre el frontend (puerto 3000) y los
-# servicios backend (materias, alumnos, inscripciones).
+# Los upstreams se arman en caliente desde Consul (solo instancias healthy).
+# Si una replica se registra o se da de baja, consul-template regenera este
+# archivo y recarga nginx. Corre en su propio contenedor, entre el frontend
+# (puerto 3000) y los servicios backend.
 #
-# Este archivo se copia a /etc/nginx/conf.d/default.conf (contexto http).
+# Este archivo se renderiza a /etc/nginx/conf.d/default.conf (contexto http).
 
 # ---------------------------------------------------------------------------
 # Bitacora: incluye a que replica se mando cada peticion ($upstream_addr)
@@ -15,27 +17,33 @@ access_log /dev/stdout gateway;
 error_log  /dev/stderr warn;
 
 # ---------------------------------------------------------------------------
-# Upstreams: un grupo por servicio, 3 replicas cada uno.
+# Upstreams dinamicos: Consul es el service registry.
 # Algoritmo: round robin (por defecto). Alternativa: agregar `least_conn;`
-# Health check pasivo: si una replica falla 2 veces seguidas, nginx la saca
-# de la rotacion durante 10 s y luego vuelve a intentar.
+# Health check activo: Consul pega a /health cada 5 s. Las replicas que no
+# pasan no aparecen aqui. Health check pasivo de nginx como respaldo.
 # ---------------------------------------------------------------------------
 upstream materias_backend {
-    server servicio_materias_1:8080 max_fails=2 fail_timeout=10s;
-    server servicio_materias_2:8080 max_fails=2 fail_timeout=10s;
-    server servicio_materias_3:8080 max_fails=2 fail_timeout=10s;
+{{- range service "materias" }}
+    server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
 }
 
 upstream alumnos_backend {
-    server servicio_alumnos_1:8080 max_fails=2 fail_timeout=10s;
-    server servicio_alumnos_2:8080 max_fails=2 fail_timeout=10s;
-    server servicio_alumnos_3:8080 max_fails=2 fail_timeout=10s;
+{{- range service "alumnos" }}
+    server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
 }
 
 upstream inscripciones_backend {
-    server servicio_inscripciones_1:8080 max_fails=2 fail_timeout=10s;
-    server servicio_inscripciones_2:8080 max_fails=2 fail_timeout=10s;
-    server servicio_inscripciones_3:8080 max_fails=2 fail_timeout=10s;
+{{- range service "inscripciones" }}
+    server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
 }
 
 server {

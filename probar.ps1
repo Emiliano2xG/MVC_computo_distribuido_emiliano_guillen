@@ -47,6 +47,65 @@ try {
     }
 } catch { Fail "Consul catalogo: $($_.Exception.Message)" }
 
+# ---- gRPC (grpcurl contra el gateway :9000) ----
+$grpcurl = $null
+$cmdG = Get-Command grpcurl -ErrorAction SilentlyContinue
+if ($cmdG) { $grpcurl = $cmdG.Source }
+elseif (Get-Command go -ErrorAction SilentlyContinue) {
+    $cand = Join-Path (go env GOPATH) "bin\grpcurl.exe"
+    if (Test-Path $cand) { $grpcurl = $cand }
+}
+
+function Grpc($proto, $json, $method, [switch]$Verbose) {
+    $args2 = @("-plaintext", "-import-path", "servicios/proto", "-proto", $proto)
+    if ($Verbose) { $args2 += "-v" }
+    $args2 += @("-d", "@", "localhost:9000", $method)
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $out = $json | & $grpcurl @args2 2>&1 | Out-String
+    $ErrorActionPreference = $prev
+    return $out
+}
+
+if (-not $grpcurl) {
+    Write-Host "SALTADO  pruebas gRPC (no hay grpcurl: go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest)" -ForegroundColor Yellow
+} else {
+    try {
+        $o = Grpc "materias.proto" '{"id":1}' "horarios.materias.v1.MateriasService/GetMateria"
+        if ($o -match "MAT31051") { Pass "gRPC Materias.GetMateria por el gateway :9000" } else { Fail "gRPC GetMateria: $o" }
+    } catch { Fail "gRPC GetMateria" }
+
+    $o = Grpc "materias.proto" '{"id":99999}' "horarios.materias.v1.MateriasService/GetMateria"
+    if ($o -match "NotFound") { Pass "gRPC materia inexistente = NotFound" } else { Fail "gRPC NotFound: $o" }
+
+    $o = Grpc "alumnos.proto" '{"correo":"0250947@up.edu.mx","password":"emilianoguillen90"}' "horarios.alumnos.v1.AlumnosService/Login"
+    if ($o -match "Ciberseguridad") { Pass "gRPC Alumnos.Login" } else { Fail "gRPC Login: $o" }
+
+    $o = Grpc "alumnos.proto" '{"correo":"0250947@up.edu.mx","password":"mal"}' "horarios.alumnos.v1.AlumnosService/Login"
+    if ($o -match "Unauthenticated") { Pass "gRPC login incorrecto = Unauthenticated" } else { Fail "gRPC login malo: $o" }
+
+    $rob = (curl.exe -s "$api/materias" | ConvertFrom-Json) | Where-Object { $_.clave -eq "MEC32070" } | Select-Object -First 1
+    if ($rob) {
+        $o = Grpc "inscripciones.proto" ("{`"alumno_id`":1,`"materia_id`":$($rob.id)}") "horarios.inscripciones.v1.InscripcionesService/Inscribir"
+        if ($o -match "PermissionDenied") { Pass "gRPC Inscribir materia de otra carrera = PermissionDenied (inscripciones -> alumnos/materias por gRPC)" } else { Fail "gRPC otra carrera: $o" }
+    }
+
+    $o = Grpc "inscripciones.proto" '{"alumno_id":9999,"materia_id":1}' "horarios.inscripciones.v1.InscripcionesService/Inscribir"
+    if ($o -match "NotFound") { Pass "gRPC Inscribir alumno inexistente = NotFound" } else { Fail "gRPC alumno inexistente: $o" }
+
+    $vistas = 1..9 | ForEach-Object {
+        $v = Grpc "materias.proto" '{"id":1}' "horarios.materias.v1.MateriasService/GetMateria" -Verbose
+        if ($v -match "x-instance-id:\s*(\S+)") { $Matches[1] }
+    } | Sort-Object -Unique
+    if (@($vistas).Count -ge 2) { Pass ("gRPC balanceo en el gateway: reparte a " + ($vistas -join ", ")) } else { Fail "gRPC balanceo: $($vistas -join ',')" }
+
+    try {
+        $gm = (Invoke-WebRequest "http://localhost:8500/v1/health/service/materias-grpc?passing=true" -UseBasicParsing).Content | ConvertFrom-Json
+        $ga = (Invoke-WebRequest "http://localhost:8500/v1/health/service/alumnos-grpc?passing=true" -UseBasicParsing).Content | ConvertFrom-Json
+        $gi = (Invoke-WebRequest "http://localhost:8500/v1/health/service/inscripciones-grpc?passing=true" -UseBasicParsing).Content | ConvertFrom-Json
+        if (@($gm).Count -eq 3 -and @($ga).Count -eq 3 -and @($gi).Count -eq 3) { Pass "Consul registry gRPC: 3 + 3 + 3 (check grpc.health.v1)" } else { Fail "Consul gRPC materias=$(@($gm).Count) alumnos=$(@($ga).Count) inscripciones=$(@($gi).Count)" }
+    } catch { Fail "Consul catalogo gRPC" }
+}
+
 try {
     $front = (Invoke-WebRequest "http://localhost:3000" -UseBasicParsing).StatusCode
     if ($front -eq 200) { Pass "frontend 200" } else { Fail "frontend $front" }
@@ -248,7 +307,8 @@ docker stop $replica | Out-Null
 Start-Sleep -Seconds 6
 try {
     $left = ConsulPassing "materias"
-    if ($left -eq 2) { Pass "Consul saco la replica caida (materias healthy=$left)" } else { Fail "Consul materias healthy=$left (se esperaban 2)" }
+    $leftG = ConsulPassing "materias-grpc"
+    if ($left -eq 2 -and $leftG -eq 2) { Pass "Consul saco la replica caida (materias http=$left, grpc=$leftG)" } else { Fail "Consul materias http=$left grpc=$leftG (se esperaban 2 y 2)" }
 } catch { Fail "Consul no mostro la baja de la replica" }
 try {
     $r = Invoke-WebRequest "$api/materias" -UseBasicParsing

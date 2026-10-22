@@ -74,6 +74,19 @@ func (m *MateriaModel) GetByID(id int) (*Materia, error) {
 	return item, nil
 }
 
+// PerteneceACarrera dice si la materia esta en el plan de la carrera.
+func (m *MateriaModel) PerteneceACarrera(materiaID int, carreraID int) (bool, error) {
+	var n int
+	err := m.DB.QueryRow(
+		`SELECT COUNT(*) FROM carrera_materias WHERE materia_id = $1 AND carrera_id = $2`,
+		materiaID, carreraID,
+	).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (m *MateriaModel) Create(item Materia) (*Materia, error) {
 	query := `INSERT INTO materias (clave, nombre, profesor, cupo, horario, dias) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`
 	err := m.DB.QueryRow(query, item.Clave, item.Nombre, item.Profesor, item.Cupo, item.Horario, item.Dias).Scan(&item.ID)

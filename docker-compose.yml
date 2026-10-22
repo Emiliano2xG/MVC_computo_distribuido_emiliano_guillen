@@ -1,7 +1,7 @@
 # Arranque del proyecto (Windows, Mac o Linux):
 #   docker compose up --build
 # Frente: http://localhost:3000
-# Gateway nginx (load balancer): http://localhost:8000
+# Gateway nginx (load balancer) REST: http://localhost:8000   gRPC: localhost:9000
 # Consul UI (service discovery): http://localhost:8500
 # Parar:  docker compose down
 
@@ -51,6 +51,7 @@ services:
       DB_HOST: base_de_datos
       DB_PORT: "5432"
       CONSUL_HTTP_ADDR: consul:8500
+      GRPC_GATEWAY_ADDR: load_balancer:9000
       INSTANCE_ID: materias-1
       SERVICE_ADDRESS: servicio_materias_1
     depends_on:
@@ -205,7 +206,8 @@ services:
     environment:
       CONSUL_HTTP_ADDR: consul:8500
     ports:
-      - "8000:8000"
+      - "8000:8000"   # gateway REST (frontend)
+      - "9000:9000"   # gateway gRPC (grpcurl y comunicacion entre servicios)
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/heartbeat | grep -q alive"]
       interval: 5s

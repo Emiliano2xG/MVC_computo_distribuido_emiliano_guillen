@@ -23,6 +23,7 @@ error_log  /dev/stderr warn;
 # pasan no aparecen aqui. Health check pasivo de nginx como respaldo.
 # ---------------------------------------------------------------------------
 upstream materias_backend {
+    zone materias_backend 64k;
 {{- range service "materias" }}
     server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
 {{- else }}
@@ -31,6 +32,7 @@ upstream materias_backend {
 }
 
 upstream alumnos_backend {
+    zone alumnos_backend 64k;
 {{- range service "alumnos" }}
     server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
 {{- else }}
@@ -39,11 +41,86 @@ upstream alumnos_backend {
 }
 
 upstream inscripciones_backend {
+    zone inscripciones_backend 64k;
 {{- range service "inscripciones" }}
     server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
 {{- else }}
     server 127.0.0.1:65535 down;
 {{- end }}
+}
+
+# ---------------------------------------------------------------------------
+# Upstreams gRPC (puerto 9090 de cada replica). En Consul son los servicios
+# "<nombre>-grpc", con health check del protocolo grpc.health.v1.
+# ---------------------------------------------------------------------------
+upstream materias_grpc {
+    zone materias_grpc 64k;
+{{- range service "materias-grpc" }}
+    server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
+}
+
+upstream alumnos_grpc {
+    zone alumnos_grpc 64k;
+{{- range service "alumnos-grpc" }}
+    server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
+}
+
+upstream inscripciones_grpc {
+    zone inscripciones_grpc 64k;
+{{- range service "inscripciones-grpc" }}
+    server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
+}
+
+# ---------------------------------------------------------------------------
+# Gateway gRPC (:9000, HTTP/2). Enruta por el nombre del servicio gRPC
+# (primer segmento del path: /<paquete>.<Servicio>/<Metodo>) y reparte con
+# round robin entre las replicas healthy. Lo usan grpcurl y los servicios
+# entre si (inscripciones -> alumnos / materias).
+# ---------------------------------------------------------------------------
+server {
+    listen 9000;
+    http2 on;
+    server_name _;
+
+    grpc_connect_timeout 2s;
+    grpc_send_timeout    30s;
+    grpc_read_timeout    30s;
+
+    # Failover: si la replica no conecta, se reintenta con otra.
+    grpc_next_upstream         error timeout;
+    grpc_next_upstream_tries   3;
+    grpc_next_upstream_timeout 10s;
+
+    grpc_set_header X-Real-IP $remote_addr;
+
+    location /horarios.materias.v1.MateriasService/ {
+        grpc_pass grpc://materias_grpc;
+    }
+
+    location /horarios.alumnos.v1.AlumnosService/ {
+        grpc_pass grpc://alumnos_grpc;
+    }
+
+    location /horarios.inscripciones.v1.InscripcionesService/ {
+        grpc_pass grpc://inscripciones_grpc;
+    }
+
+    # Cualquier otra ruta: gRPC UNIMPLEMENTED (12) en vez de un 404 HTTP.
+    location / {
+        add_header Content-Type  application/grpc always;
+        add_header grpc-status   12 always;
+        add_header grpc-message  "servicio no registrado en el gateway" always;
+        return 204;
+    }
 }
 
 server {

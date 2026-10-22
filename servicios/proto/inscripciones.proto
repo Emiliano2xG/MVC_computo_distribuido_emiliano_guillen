@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package horarios.inscripciones.v1;
+
+option go_package = "horarios/pb/inscripciones;inscripcionespb";
+
+// Altas y bajas de materias. Para dar de alta, este servicio le pregunta por
+// gRPC a Alumnos (carrera del alumno) y a Materias (si es de esa carrera).
+service InscripcionesService {
+  // Horario (inscripciones) de un alumno.
+  rpc ListarPorAlumno(ListarPorAlumnoRequest) returns (ListarPorAlumnoResponse);
+
+  // Alta de una materia.
+  //   NOT_FOUND           alumno o materia inexistente
+  //   PERMISSION_DENIED   la materia no es de la carrera del alumno
+  //   ALREADY_EXISTS      ya esta inscrito
+  //   FAILED_PRECONDITION sin cupo o materia ya cursada
+  //   UNAVAILABLE         no se pudo consultar Alumnos o Materias
+  rpc Inscribir(InscribirRequest) returns (Inscripcion);
+
+  // Baja de una inscripcion. NOT_FOUND si no existe.
+  rpc DarDeBaja(DarDeBajaRequest) returns (DarDeBajaResponse);
+}
+
+message Inscripcion {
+  int32 id = 1;
+  int32 alumno_id = 2;
+  int32 materia_id = 3;
+  string estado = 4;
+  string materia = 5;
+  string clave = 6;
+  string profesor = 7;
+  string horario = 8;
+  string dias = 9;
+}
+
+message ListarPorAlumnoRequest {
+  int32 alumno_id = 1;
+}
+
+message ListarPorAlumnoResponse {
+  repeated Inscripcion inscripciones = 1;
+}
+
+message InscribirRequest {
+  int32 alumno_id = 1;
+  int32 materia_id = 2;
+}
+
+message DarDeBajaRequest {
+  int32 id = 1;
+}
+
+message DarDeBajaResponse {}

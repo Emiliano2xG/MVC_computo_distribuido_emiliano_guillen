@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package horarios.materias.v1;
+
+option go_package = "horarios/pb/materias;materiaspb";
+
+// Catalogo de materias.
+service MateriasService {
+  // Lista las materias. Con carrera_id > 0 solo las de esa carrera
+  // (incluye el tronco comun).
+  rpc ListarMaterias(ListarMateriasRequest) returns (ListarMateriasResponse);
+
+  // Devuelve una materia por id. NOT_FOUND si no existe.
+  rpc GetMateria(GetMateriaRequest) returns (Materia);
+
+  // Dice si una materia forma parte del plan de una carrera.
+  // Lo usa el servicio de inscripciones para validar el alta.
+  rpc MateriaPerteneceACarrera(PerteneceRequest) returns (PerteneceResponse);
+}
+
+message Materia {
+  int32 id = 1;
+  string clave = 2;
+  string nombre = 3;
+  string profesor = 4;
+  int32 cupo = 5;
+  int32 inscritos = 6;
+  string horario = 7;
+  string dias = 8;
+  int32 semestre = 9;
+}
+
+message ListarMateriasRequest {
+  int32 carrera_id = 1;
+}
+
+message ListarMateriasResponse {
+  repeated Materia materias = 1;
+}
+
+message GetMateriaRequest {
+  int32 id = 1;
+}
+
+message PerteneceRequest {
+  int32 materia_id = 1;
+  int32 carrera_id = 2;
+}
+
+message PerteneceResponse {
+  bool pertenece = 1;
+}

@@ -11,6 +11,9 @@ var ErrSinCupo = errors.New("ya no hay cupo en esa materia")
 var ErrYaInscrito = errors.New("el alumno ya esta inscrito en esa materia")
 var ErrYaCursada = errors.New("esa materia ya esta cursada")
 var ErrOtraCarrera = errors.New("esa materia no es de tu carrera")
+var ErrAlumnoNoExiste = errors.New("el alumno no existe")
+var ErrMateriaNoExiste = errors.New("la materia no existe")
+var ErrServicioNoDisponible = errors.New("no se pudo consultar otro servicio (alumnos/materias)")
 
 type Inscripcion struct {
 	ID        int    `json:"id"`
@@ -58,24 +61,15 @@ func esLlaveDuplicada(err error) bool {
 	return errors.As(err, &pqErr) && pqErr.Code == "23505"
 }
 
+// Create guarda el alta (duplicados, cupo, todo en una transaccion).
+// Que el alumno y la materia existan y que la materia sea de su carrera ya
+// lo validó InscripcionService preguntando por gRPC a alumnos y materias.
 func (m *InscripcionModel) Create(alumnoID int, materiaID int) (*Inscripcion, error) {
 	tx, err := m.DB.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-
-	var vaConCarrera int
-	err = tx.QueryRow(`
-		SELECT COUNT(*) FROM carrera_materias cm
-		JOIN alumnos a ON a.carrera_id = cm.carrera_id
-		WHERE a.id = $1 AND cm.materia_id = $2`, alumnoID, materiaID).Scan(&vaConCarrera)
-	if err != nil {
-		return nil, err
-	}
-	if vaConCarrera == 0 {
-		return nil, ErrOtraCarrera
-	}
 
 	var estadoExistente string
 	err = tx.QueryRow(`SELECT estado FROM inscripciones WHERE alumno_id = $1 AND materia_id = $2`, alumnoID, materiaID).Scan(&estadoExistente)
@@ -92,7 +86,7 @@ func (m *InscripcionModel) Create(alumnoID int, materiaID int) (*Inscripcion, er
 	var cupo int
 	err = tx.QueryRow(`SELECT cupo FROM materias WHERE id = $1 FOR UPDATE`, materiaID).Scan(&cupo)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errors.New("la materia no existe")
+		return nil, ErrMateriaNoExiste
 	}
 	if err != nil {
 		return nil, err

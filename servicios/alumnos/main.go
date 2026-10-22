@@ -9,9 +9,13 @@ import (
 	"time"
 
 	"alumnos/controllers"
+	"alumnos/grpcserver"
 	"alumnos/models"
 
 	"horarios/discovery"
+	pb "horarios/pb/alumnos"
+
+	"google.golang.org/grpc"
 
 	_ "github.com/lib/pq"
 )
@@ -72,8 +76,16 @@ func main() {
 	mux.HandleFunc("/heartbeat", withInstanceHeader(heartbeatHandler))
 	mux.HandleFunc("/health", withInstanceHeader(discovery.HealthHandler(db.Ping)))
 
-	log.Printf("backend %s listening on :8080", instanceID)
-	if err := discovery.ListenAndServe(":8080", "alumnos", mux); err != nil {
+	log.Printf("backend %s: REST :8080 + gRPC :9090", instanceID)
+	err = discovery.Run(discovery.Config{
+		Name:    "alumnos",
+		Handler: mux,
+		Ping:    db.Ping,
+		RegisterGRPC: func(s *grpc.Server) {
+			pb.RegisterAlumnosServiceServer(s, &grpcserver.Server{Model: alumnoModel})
+		},
+	})
+	if err != nil {
 		log.Fatal(err)
 	}
 }

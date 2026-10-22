@@ -8,10 +8,16 @@ import (
 	"os"
 	"time"
 
+	"inscripciones/clients"
 	"inscripciones/controllers"
+	"inscripciones/grpcserver"
 	"inscripciones/models"
+	"inscripciones/service"
 
 	"horarios/discovery"
+	pb "horarios/pb/inscripciones"
+
+	"google.golang.org/grpc"
 
 	_ "github.com/lib/pq"
 )
@@ -64,7 +70,19 @@ func main() {
 
 	// Initialize MVC Components
 	inscripcionModel := &models.InscripcionModel{DB: db}
-	inscripcionController := &controllers.InscripcionController{InscripcionModel: inscripcionModel}
+
+	// Clientes gRPC hacia alumnos y materias (pasan por el load balancer :9000).
+	cl, err := clients.New()
+	if err != nil {
+		log.Fatal("Failed to create gRPC clients:", err)
+	}
+	defer cl.Close()
+	inscripcionService := service.New(inscripcionModel, cl)
+
+	inscripcionController := &controllers.InscripcionController{
+		InscripcionModel: inscripcionModel,
+		Service:          inscripcionService,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/inscripciones", withInstanceHeader(inscripcionController.InscripcionesHandler))
@@ -72,8 +90,19 @@ func main() {
 	mux.HandleFunc("/heartbeat", withInstanceHeader(heartbeatHandler))
 	mux.HandleFunc("/health", withInstanceHeader(discovery.HealthHandler(db.Ping)))
 
-	log.Printf("backend %s listening on :8080", instanceID)
-	if err := discovery.ListenAndServe(":8080", "inscripciones", mux); err != nil {
+	log.Printf("backend %s: REST :8080 + gRPC :9090", instanceID)
+	err = discovery.Run(discovery.Config{
+		Name:    "inscripciones",
+		Handler: mux,
+		Ping:    db.Ping,
+		RegisterGRPC: func(s *grpc.Server) {
+			pb.RegisterInscripcionesServiceServer(s, &grpcserver.Server{
+				Model:   inscripcionModel,
+				Service: inscripcionService,
+			})
+		},
+	})
+	if err != nil {
 		log.Fatal(err)
 	}
 }

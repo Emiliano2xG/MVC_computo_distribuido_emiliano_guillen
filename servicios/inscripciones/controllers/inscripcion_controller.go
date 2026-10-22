@@ -9,10 +9,12 @@ import (
 	"strings"
 
 	"inscripciones/models"
+	"inscripciones/service"
 )
 
 type InscripcionController struct {
 	InscripcionModel *models.InscripcionModel
+	Service          *service.InscripcionService
 }
 
 func (c *InscripcionController) InscripcionesHandler(w http.ResponseWriter, r *http.Request) {
@@ -45,9 +47,17 @@ func (c *InscripcionController) InscripcionesHandler(w http.ResponseWriter, r *h
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
-		item, err := c.InscripcionModel.Create(body.AlumnoID, body.MateriaID)
+		item, err := c.Service.Inscribir(r.Context(), body.AlumnoID, body.MateriaID)
 		if errors.Is(err, models.ErrOtraCarrera) {
 			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		if errors.Is(err, models.ErrAlumnoNoExiste) || errors.Is(err, models.ErrMateriaNoExiste) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, models.ErrServicioNoDisponible) {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		if errors.Is(err, models.ErrSinCupo) || errors.Is(err, models.ErrYaInscrito) || errors.Is(err, models.ErrYaCursada) {

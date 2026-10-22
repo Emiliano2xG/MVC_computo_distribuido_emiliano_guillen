@@ -16,6 +16,7 @@ import (
 	"time"
 )
 
+// Registration es un servicio registrado en Consul. Se da de baja con Deregister.
 type Registration struct {
 	baseURL   string
 	serviceID string
@@ -32,11 +33,22 @@ type servicePayload struct {
 }
 
 type check struct {
-	HTTP                           string `json:"HTTP"`
+	HTTP                           string `json:"HTTP,omitempty"`
+	GRPC                           string `json:"GRPC,omitempty"`
+	GRPCUseTLS                     bool   `json:"GRPCUseTLS,omitempty"`
 	Interval                       string `json:"Interval"`
 	Timeout                        string `json:"Timeout"`
 	DeregisterCriticalServiceAfter string `json:"DeregisterCriticalServiceAfter"`
 	Status                         string `json:"Status"`
+}
+
+// Spec describe un servicio a registrar. Con GRPC=true el health check de
+// Consul es el protocolo estandar grpc.health.v1 (en vez de GET /health).
+type Spec struct {
+	Name string
+	ID   string
+	Port int
+	GRPC bool
 }
 
 func consulBaseURL() string {
@@ -57,16 +69,17 @@ func serviceAddress() (string, error) {
 	return os.Hostname()
 }
 
-func servicePort() int {
-	if v := os.Getenv("SERVICE_PORT"); v != "" {
+func envPort(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
 			return p
 		}
 	}
-	return 8080
+	return def
 }
 
-func instanceID(serviceName string) string {
+// InstanceID devuelve INSTANCE_ID o, si no esta, un id basado en el hostname.
+func InstanceID(serviceName string) string {
 	if v := os.Getenv("INSTANCE_ID"); v != "" {
 		return v
 	}
@@ -74,28 +87,37 @@ func instanceID(serviceName string) string {
 	return serviceName + "-" + host
 }
 
-func Register(serviceName string) (*Registration, error) {
-	id := instanceID(serviceName)
+// Register da de alta un servicio en el service registry de Consul con su
+// health check. Reintenta hasta 12 veces (Consul puede estar arrancando).
+func Register(s Spec) (*Registration, error) {
 	address, err := serviceAddress()
 	if err != nil {
 		return nil, fmt.Errorf("consul: hostname: %w", err)
 	}
-	port := servicePort()
 	base := consulBaseURL()
 
+	chk := &check{
+		Interval:                       "5s",
+		Timeout:                        "2s",
+		DeregisterCriticalServiceAfter: "30s",
+		Status:                         "passing",
+	}
+	tags := []string{s.Name}
+	if s.GRPC {
+		chk.GRPC = fmt.Sprintf("%s:%d", address, s.Port)
+		tags = append(tags, "grpc")
+	} else {
+		chk.HTTP = fmt.Sprintf("http://%s:%d/health", address, s.Port)
+		tags = append(tags, "http")
+	}
+
 	payload := servicePayload{
-		ID:      id,
-		Name:    serviceName,
+		ID:      s.ID,
+		Name:    s.Name,
 		Address: address,
-		Port:    port,
-		Tags:    []string{serviceName},
-		Check: &check{
-			HTTP:                           fmt.Sprintf("http://%s:%d/health", address, port),
-			Interval:                       "5s",
-			Timeout:                        "2s",
-			DeregisterCriticalServiceAfter: "30s",
-			Status:                         "passing",
-		},
+		Port:    s.Port,
+		Tags:    tags,
+		Check:   chk,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -114,8 +136,8 @@ func Register(serviceName string) (*Registration, error) {
 		resp, err := client.Do(req)
 		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			resp.Body.Close()
-			log.Printf("consul: registrado %s id=%s addr=%s:%d", serviceName, id, address, port)
-			return &Registration{baseURL: base, serviceID: id, client: client}, nil
+			log.Printf("consul: registrado %s id=%s addr=%s:%d", s.Name, s.ID, address, s.Port)
+			return &Registration{baseURL: base, serviceID: s.ID, client: client}, nil
 		}
 		if err != nil {
 			lastErr = err
@@ -126,9 +148,10 @@ func Register(serviceName string) (*Registration, error) {
 		log.Printf("consul: reintento registro (%d/12): %v", i+1, lastErr)
 		time.Sleep(time.Second)
 	}
-	return nil, fmt.Errorf("consul: no se pudo registrar %s: %w", id, lastErr)
+	return nil, fmt.Errorf("consul: no se pudo registrar %s: %w", s.ID, lastErr)
 }
 
+// Deregister saca el servicio del registry de Consul.
 func (r *Registration) Deregister() {
 	if r == nil || r.client == nil {
 		return
@@ -152,6 +175,7 @@ func (r *Registration) Deregister() {
 	log.Printf("consul: baja %s status %s", r.serviceID, resp.Status)
 }
 
+// HealthHandler es el GET /health que consulta Consul (check HTTP).
 func HealthHandler(ping func() error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if ping != nil {
@@ -163,43 +187,6 @@ func HealthHandler(ping func() error) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
-	}
-}
-
-func ListenAndServe(addr, serviceName string, handler http.Handler) error {
-	server := &http.Server{Addr: addr, Handler: handler}
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- server.ListenAndServe()
-	}()
-
-	if err := waitReady(addr, 5*time.Second); err != nil {
-		server.Close()
-		return err
-	}
-
-	reg, err := Register(serviceName)
-	if err != nil {
-		server.Close()
-		return err
-	}
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-
-	select {
-	case err := <-errCh:
-		reg.Deregister()
-		if err == http.ErrServerClosed {
-			return nil
-		}
-		return err
-	case <-sig:
-		reg.Deregister()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return server.Shutdown(ctx)
 	}
 }
 
@@ -218,4 +205,14 @@ func waitReady(addr string, timeout time.Duration) error {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout esperando %s", addr)
+}
+
+func waitSignal() <-chan os.Signal {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	return sig
+}
+
+func shutdownContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 5*time.Second)
 }

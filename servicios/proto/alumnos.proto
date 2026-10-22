@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package horarios.alumnos.v1;
+
+option go_package = "horarios/pb/alumnos;alumnospb";
+
+// Alumnos, login y carreras.
+service AlumnosService {
+  // Devuelve un alumno por id. NOT_FOUND si no existe.
+  rpc GetAlumno(GetAlumnoRequest) returns (Alumno);
+
+  // Valida correo y contrasena. UNAUTHENTICATED si no coinciden.
+  rpc Login(LoginRequest) returns (Alumno);
+
+  // Lista las carreras.
+  rpc ListarCarreras(ListarCarrerasRequest) returns (ListarCarrerasResponse);
+}
+
+message Alumno {
+  int32 id = 1;
+  string nombre = 2;
+  string matricula = 3;
+  string correo = 4;
+  int32 carrera_id = 5;
+  string carrera = 6;
+}
+
+message Carrera {
+  int32 id = 1;
+  string clave = 2;
+  string nombre = 3;
+}
+
+message GetAlumnoRequest {
+  int32 id = 1;
+}
+
+message LoginRequest {
+  string correo = 1;
+  string password = 2;
+}
+
+message ListarCarrerasRequest {}
+
+message ListarCarrerasResponse {
+  repeated Carrera carreras = 1;
+}

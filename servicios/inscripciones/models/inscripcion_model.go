@@ -10,6 +10,7 @@ import (
 var ErrSinCupo = errors.New("ya no hay cupo en esa materia")
 var ErrYaInscrito = errors.New("el alumno ya esta inscrito en esa materia")
 var ErrYaCursada = errors.New("esa materia ya esta cursada")
+var ErrEmpalme = errors.New("el horario empalma con otra materia que ya tienes inscrita")
 var ErrOtraCarrera = errors.New("esa materia no es de tu carrera")
 var ErrAlumnoNoExiste = errors.New("el alumno no existe")
 var ErrMateriaNoExiste = errors.New("la materia no existe")

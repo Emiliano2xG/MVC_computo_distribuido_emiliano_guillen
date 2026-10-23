@@ -4,6 +4,8 @@
 # Gateway nginx (load balancer) REST: http://localhost:8000   gRPC: localhost:9000
 # Consul UI (service discovery): http://localhost:8500
 # Kafka UI (mensajeria asincrona): http://localhost:8090
+# Grafana (dashboard, sin login): http://localhost:3001   Prometheus: http://localhost:9091
+# Swagger UI (documentacion de la API): http://localhost:8081
 # Parar:  docker compose down
 
 # Entorno y dependencias que comparten los backends con base de datos.
@@ -83,7 +85,7 @@ services:
     command:
       - |
         set -e
-        for t in alumnos.eventos materias.eventos inscripciones.eventos; do
+        for t in alumnos.eventos materias.eventos inscripciones.eventos espera.eventos; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
             --topic $$t --partitions 3 --replication-factor 1
         done
@@ -264,6 +266,117 @@ services:
     networks:
       - horarios-net
 
+  # ---- espera (lista de espera: consume materias.eventos, publica espera.eventos) ----
+  # Cuando se libera un lugar inscribe al primero de la fila llamando por gRPC
+  # a inscripciones (a traves del gateway :9000). Una sola replica.
+  servicio_espera:
+    build:
+      context: ./servicios
+      dockerfile: espera/Dockerfile
+    hostname: espera-1
+    environment:
+      <<: *env_backend
+      INSTANCE_ID: espera-1
+      SERVICE_ADDRESS: servicio_espera
+    depends_on: *deps_backend
+    networks:
+      - horarios-net
+
+  # ---- auditoria (consume todos los topicos y los guarda en Postgres) ----
+  # 2 replicas en el mismo grupo de Kafka ("auditoria"): las particiones se
+  # reparten entre ellas y el id del evento (llave primaria) evita duplicados.
+  servicio_auditoria_1:
+    build:
+      context: ./servicios
+      dockerfile: auditoria/Dockerfile
+    hostname: auditoria-1
+    environment:
+      <<: *env_backend
+      INSTANCE_ID: auditoria-1
+      SERVICE_ADDRESS: servicio_auditoria_1
+    depends_on: *deps_backend
+    networks:
+      - horarios-net
+
+  servicio_auditoria_2:
+    build:
+      context: ./servicios
+      dockerfile: auditoria/Dockerfile
+    hostname: auditoria-2
+    environment:
+      <<: *env_backend
+      INSTANCE_ID: auditoria-2
+      SERVICE_ADDRESS: servicio_auditoria_2
+    depends_on: *deps_backend
+    networks:
+      - horarios-net
+
+  # ---------------------------------------------------------------------------
+  # Observabilidad: Prometheus (metricas) + Grafana (dashboards)
+  # Prometheus encuentra las replicas preguntandole a Consul, igual que nginx.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./observabilidad/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9091:9090"
+    depends_on:
+      consul:
+        condition: service_healthy
+    networks:
+      - horarios-net
+
+  # Traduce el /status de nginx (stub_status) a formato Prometheus.
+  nginx_exporter:
+    image: nginx/nginx-prometheus-exporter:1.4.2
+    container_name: nginx_exporter
+    command:
+      - --nginx.scrape-uri=http://load_balancer:8000/status
+    depends_on:
+      load_balancer:
+        condition: service_healthy
+    networks:
+      - horarios-net
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Demo: se puede ver el dashboard sin iniciar sesion.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/horarios.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./observabilidad/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observabilidad/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - horarios-net
+
+  # Documentacion interactiva de la API REST (lee docs/openapi.yaml).
+  swagger_ui:
+    image: swaggerapi/swagger-ui:v5.17.14
+    container_name: swagger_ui
+    environment:
+      SWAGGER_JSON: /spec/openapi.yaml
+    volumes:
+      - ./docs/openapi.yaml:/spec/openapi.yaml:ro
+    ports:
+      - "8081:8080"
+    networks:
+      - horarios-net
+
   # Reverse proxy / gateway + load balancer (nginx) entre frontend y backends.
   # Los upstreams salen del catalogo de Consul (consul-template), no estan fijos.
   load_balancer:
@@ -301,6 +414,12 @@ services:
       servicio_inscripciones_3:
         condition: service_started
       servicio_notificaciones:
+        condition: service_started
+      servicio_auditoria_1:
+        condition: service_started
+      servicio_auditoria_2:
+        condition: service_started
+      servicio_espera:
         condition: service_started
     networks:
       - horarios-net

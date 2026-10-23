@@ -1,0 +1,463 @@
+openapi: 3.0.3
+info:
+  title: Horarios UP - API REST
+  version: "6.0"
+  description: |
+    API REST del sistema de horarios de la UP. **Todo pasa por el gateway nginx** (`:8000`),
+    que reparte las peticiones entre las replicas de cada servicio con round robin.
+    Las replicas las descubre en Consul, no estan escritas a mano.
+
+    Cada respuesta trae dos cabeceras utiles para demostrar el balanceo:
+    * `X-Instance-Id`: la replica que contesto (por ejemplo `materias-2`).
+    * `X-Request-Id`: id unico de la peticion, generado por el gateway y reenviado al backend.
+
+    El gateway limita a 50 peticiones por segundo por IP (con rafaga de 100);
+    arriba de eso responde `429`.
+
+    Esta API es la que usa el navegador. Entre servicios la comunicacion es
+    gRPC (ver `servicios/proto/`) y los eventos viajan por Kafka.
+servers:
+  - url: http://localhost:8000
+    description: Gateway nginx
+
+tags:
+  - name: Materias
+    description: Catalogo de materias (servicio `materias`, 3 replicas)
+  - name: Alumnos
+    description: Cuentas, login y carreras (servicio `alumnos`, 3 replicas)
+  - name: Inscripciones
+    description: Altas y bajas del horario (servicio `inscripciones`, 3 replicas)
+  - name: Notificaciones
+    description: Mensajes generados a partir de eventos de Kafka (servicio `notificaciones`)
+  - name: Espera
+    description: Lista de espera de materias llenas (servicio `espera`); inscribe solo al primero cuando se libera un lugar
+  - name: Auditoria
+    description: Bitacora permanente de todos los eventos de Kafka (servicio `auditoria`, 2 replicas)
+  - name: Gateway
+    description: Endpoints propios de nginx
+
+paths:
+  /materias:
+    get:
+      tags: [Materias]
+      summary: Lista las materias
+      description: Con `carrera_id` solo devuelve las del plan de esa carrera (incluye el tronco comun).
+      parameters:
+        - name: carrera_id
+          in: query
+          schema: { type: integer, example: 1 }
+      responses:
+        "200":
+          description: Lista de materias
+          headers:
+            X-Instance-Id: { $ref: "#/components/headers/XInstanceId" }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Materia" }
+        "400": { description: carrera_id invalido }
+    post:
+      tags: [Materias]
+      summary: Crea una materia
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Materia" }
+      responses:
+        "201":
+          description: Materia creada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Materia" }
+  /materias/{id}:
+    get:
+      tags: [Materias]
+      summary: Una materia por id
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, example: 1 } }
+      responses:
+        "200":
+          description: La materia
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Materia" }
+        "404": { description: No existe }
+
+  /alumnos:
+    get:
+      tags: [Alumnos]
+      summary: Lista los alumnos
+      responses:
+        "200":
+          description: Lista de alumnos (sin contrasena)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Alumno" }
+    post:
+      tags: [Alumnos]
+      summary: Crea una cuenta
+      description: |
+        El correo debe ser `@up.edu.mx`. Al crearla, el servicio publica el evento
+        `alumno.creado` en Kafka (topico `alumnos.eventos`) y `notificaciones` y
+        `auditoria` reaccionan.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nombre, correo, password, carrera_id]
+              properties:
+                nombre: { type: string, example: Ana Prueba }
+                matricula: { type: string, example: "0259999" }
+                correo: { type: string, example: 0259999@up.edu.mx }
+                password: { type: string, example: secreto123 }
+                carrera_id: { type: integer, example: 1 }
+      responses:
+        "201":
+          description: Cuenta creada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alumno" }
+        "400": { description: Faltan campos obligatorios }
+        "409": { description: Correo o matricula ya registrados, o correo que no es @up.edu.mx }
+  /alumnos/{id}:
+    get:
+      tags: [Alumnos]
+      summary: Un alumno por id
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, example: 1 } }
+      responses:
+        "200":
+          description: El alumno
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alumno" }
+        "404": { description: No existe }
+  /alumnos/login:
+    post:
+      tags: [Alumnos]
+      summary: Inicia sesion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correo, password]
+              properties:
+                correo: { type: string, example: 0250947@up.edu.mx }
+                password: { type: string, example: emilianoguillen90 }
+      responses:
+        "200":
+          description: Datos del alumno
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Alumno" }
+        "401": { description: Correo o contrasena incorrectos }
+  /alumnos/carreras:
+    get:
+      tags: [Alumnos]
+      summary: Lista las carreras
+      responses:
+        "200":
+          description: Carreras
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Carrera" }
+
+  /inscripciones:
+    get:
+      tags: [Inscripciones]
+      summary: Horario de un alumno
+      parameters:
+        - { name: alumno_id, in: query, required: true, schema: { type: integer, example: 1 } }
+      responses:
+        "200":
+          description: Inscripciones del alumno
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Inscripcion" }
+        "400": { description: Falta alumno_id }
+    post:
+      tags: [Inscripciones]
+      summary: Da de alta una materia
+      description: |
+        Antes de guardar, el servicio le pregunta por **gRPC** a `alumnos` (existe y de que
+        carrera es) y a `materias` (existe y es de esa carrera). Despues guarda en Postgres con
+        `SELECT ... FOR UPDATE` (cupo y duplicado) y publica `inscripcion.creada` en Kafka.
+        Tambien rechaza la materia si **su horario empalma** con otra que el alumno ya tiene
+        inscrita (comparten dia y las horas se cruzan); por gRPC ese caso es `Aborted`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alumno_id, materia_id]
+              properties:
+                alumno_id: { type: integer, example: 1 }
+                materia_id: { type: integer, example: 2 }
+      responses:
+        "201":
+          description: Alta realizada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Inscripcion" }
+        "403": { description: La materia no es de la carrera del alumno }
+        "404": { description: Alumno o materia inexistente }
+        "409": { description: Ya inscrito, sin cupo, materia ya cursada u horario empalmado con otra materia }
+        "503": { description: No se pudo consultar a alumnos o materias (no se guarda nada) }
+  /inscripciones/{id}:
+    delete:
+      tags: [Inscripciones]
+      summary: Da de baja una inscripcion
+      description: Publica `inscripcion.cancelada` en Kafka.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "204": { description: Baja realizada }
+        "404": { description: No existe }
+        "409": { description: La materia ya esta cursada, no se puede dar de baja }
+
+  /espera:
+    get:
+      tags: [Espera]
+      summary: Filas en las que esta un alumno
+      description: Solo las activas, con su lugar (`posicion`) y cuantos esperan esa materia (`en_fila`).
+      parameters:
+        - { name: alumno_id, in: query, required: true, schema: { type: integer, example: 1 } }
+      responses:
+        "200":
+          description: Lugares en lista de espera
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Espera" }
+        "400": { description: Falta alumno_id }
+    post:
+      tags: [Espera]
+      summary: Anotarse en la lista de espera de una materia llena
+      description: |
+        Antes de guardar, `espera` valida por **gRPC**: el alumno existe, la materia existe, es de su
+        carrera, **de verdad esta llena** y el alumno no la tiene inscrita ni cursada. Publica
+        `espera.registrada` en Kafka. Cuando alguien se de de baja, el primero de la fila se inscribe
+        solo y se publica `espera.promovida`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alumno_id, materia_id]
+              properties:
+                alumno_id: { type: integer, example: 1 }
+                materia_id: { type: integer, example: 102 }
+      responses:
+        "201":
+          description: Quedo en la fila
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Espera" }
+        "400": { description: Faltan alumno_id o materia_id }
+        "403": { description: La materia no es de la carrera del alumno }
+        "404": { description: Alumno o materia inexistente }
+        "409": { description: Ya esta en la fila, ya la tiene inscrita o cursada, o la materia todavia tiene lugares }
+        "503": { description: No se pudo consultar a otro servicio }
+  /espera/{id}:
+    delete:
+      tags: [Espera]
+      summary: Salir de la fila
+      description: Publica `espera.cancelada` en Kafka.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "204": { description: Saliste de la fila }
+        "404": { description: No existe o ya no estaba esperando }
+  /espera/conteo:
+    get:
+      tags: [Espera]
+      summary: Cuantos esperan cada materia
+      description: 'Objeto con la forma {"materia_id": cantidad}.'
+      responses:
+        "200":
+          description: Conteo por materia
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: { type: integer }, example: { "102": 3 } }
+
+  /notificaciones:
+    get:
+      tags: [Notificaciones]
+      summary: Ultimas notificaciones
+      description: |
+        Se guardan en memoria (maximo 1000). Las mas nuevas primero. La cabecera
+        `X-Total-Recibidas` dice cuantos eventos se han procesado desde que arranco el servicio.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, example: 20 } }
+        - { name: destinatario, in: query, description: "Solo los avisos de esa persona (correo). Sin el, trae los de todos.", schema: { type: string, example: 0250947@up.edu.mx } }
+      responses:
+        "200":
+          description: Notificaciones
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Notificacion" }
+
+  /auditoria:
+    get:
+      tags: [Auditoria]
+      summary: Bitacora de eventos
+      description: Eventos guardados en Postgres, del mas nuevo al mas viejo. Persisten aunque se reinicie el servicio.
+      parameters:
+        - name: tipo
+          in: query
+          schema:
+            type: string
+            enum: [alumno.creado, inscripcion.creada, inscripcion.cancelada, materia.cupo_agotado, materia.cupo_liberado]
+        - name: topico
+          in: query
+          schema:
+            type: string
+            enum: [alumnos.eventos, materias.eventos, inscripciones.eventos]
+        - { name: limit, in: query, description: "Por defecto 50, maximo 500", schema: { type: integer, example: 20 } }
+      responses:
+        "200":
+          description: Eventos
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RegistroAuditoria" }
+  /auditoria/resumen:
+    get:
+      tags: [Auditoria]
+      summary: Totales de la bitacora
+      description: Cuenta por tipo, por topico y por replica que lo proceso (muestra como se reparte el grupo de consumidores).
+      responses:
+        "200":
+          description: Resumen
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResumenAuditoria" }
+
+  /heartbeat:
+    get:
+      tags: [Gateway]
+      summary: El gateway esta vivo
+      responses:
+        "200":
+          description: gateway alive
+          content:
+            text/plain:
+              schema: { type: string, example: gateway alive }
+  /status:
+    get:
+      tags: [Gateway]
+      summary: Metricas de nginx (stub_status)
+      responses:
+        "200":
+          description: Conexiones activas y peticiones atendidas
+          content:
+            text/plain:
+              schema: { type: string }
+
+components:
+  headers:
+    XInstanceId:
+      description: Replica que atendio la peticion
+      schema: { type: string, example: materias-2 }
+  schemas:
+    Materia:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        clave: { type: string, example: MAT31051 }
+        nombre: { type: string, example: Calculo Diferencial }
+        profesor: { type: string, example: Perez }
+        cupo: { type: integer, example: 32 }
+        inscritos: { type: integer, example: 4 }
+        horario: { type: string, example: 07:00-08:30 }
+        dias: { type: string, example: Lunes y Miercoles }
+        semestre: { type: integer, example: 1 }
+    Alumno:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        nombre: { type: string, example: Emiliano Guillen }
+        matricula: { type: string, example: "0250947" }
+        correo: { type: string, example: 0250947@up.edu.mx }
+        carrera_id: { type: integer, example: 1 }
+        carrera: { type: string, example: Inteligencia de Datos y Ciberseguridad }
+    Carrera:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        clave: { type: string, example: IDC }
+        nombre: { type: string, example: Inteligencia de Datos y Ciberseguridad }
+    Inscripcion:
+      type: object
+      properties:
+        id: { type: integer, example: 117 }
+        alumno_id: { type: integer, example: 5 }
+        materia_id: { type: integer, example: 101 }
+        estado: { type: string, enum: [inscrita, cursada], example: inscrita }
+        materia: { type: string }
+        clave: { type: string }
+        profesor: { type: string }
+        horario: { type: string }
+        dias: { type: string }
+    Espera:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        alumno_id: { type: integer, example: 1 }
+        materia_id: { type: integer, example: 102 }
+        materia_clave: { type: string, example: TLL-001 }
+        materia_nombre: { type: string, example: Taller de Cupo Lleno }
+        estado: { type: string, example: esperando }
+        posicion: { type: integer, description: Tu lugar en la fila (1 = el siguiente), example: 1 }
+        en_fila: { type: integer, description: Cuantos esperan esa materia en total, example: 3 }
+        creada_en: { type: string, format: date-time }
+    Notificacion:
+      type: object
+      properties:
+        evento_id: { type: string, example: 5095785123585535 }
+        tipo: { type: string, example: inscripcion.creada }
+        topico: { type: string, example: inscripciones.eventos }
+        destinatario: { type: string, example: 0251001@up.edu.mx }
+        mensaje: { type: string, example: Te inscribiste a TLL-001 - Taller de Cupo Lleno. }
+        origen: { type: string, example: inscripciones-3 }
+        ocurrio_en: { type: string, format: date-time }
+        recibida_en: { type: string, format: date-time }
+    RegistroAuditoria:
+      type: object
+      properties:
+        evento_id: { type: string }
+        tipo: { type: string, example: materia.cupo_agotado }
+        topico: { type: string, example: materias.eventos }
+        origen: { type: string, description: Replica que publico el evento, example: materias-1 }
+        version: { type: integer, example: 1 }
+        ocurrio_en: { type: string, format: date-time }
+        recibido_en: { type: string, format: date-time }
+        procesado_por: { type: string, description: Replica de auditoria que lo guardo, example: auditoria-2 }
+        datos: { type: object, additionalProperties: true }
+    ResumenAuditoria:
+      type: object
+      properties:
+        total: { type: integer, example: 42 }
+        por_tipo: { type: object, additionalProperties: { type: integer } }
+        por_topico: { type: object, additionalProperties: { type: integer } }
+        por_replica_que_lo_proceso: { type: object, additionalProperties: { type: integer } }
+        primer_evento: { type: string, format: date-time }
+        ultimo_evento: { type: string, format: date-time }

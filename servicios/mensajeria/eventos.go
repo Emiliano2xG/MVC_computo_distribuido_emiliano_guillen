@@ -16,10 +16,11 @@ const (
 	TopicAlumnos       = "alumnos.eventos"
 	TopicMaterias      = "materias.eventos"
 	TopicInscripciones = "inscripciones.eventos"
+	TopicEspera        = "espera.eventos"
 )
 
 // Topics lista todos los topicos (lo usa el init del compose y la documentacion).
-var Topics = []string{TopicAlumnos, TopicMaterias, TopicInscripciones}
+var Topics = []string{TopicAlumnos, TopicMaterias, TopicInscripciones, TopicEspera}
 
 // Tipos de evento (campo "tipo" del sobre).
 const (
@@ -28,6 +29,12 @@ const (
 	TipoInscripcionCancelada = "inscripcion.cancelada"
 	TipoMateriaCupoAgotado   = "materia.cupo_agotado"
 	TipoMateriaCupoLiberado  = "materia.cupo_liberado"
+
+	// Lista de espera (topico espera.eventos).
+	TipoEsperaRegistrada = "espera.registrada" // el alumno se anoto en la fila
+	TipoEsperaPromovida  = "espera.promovida"  // se libero un lugar y se le inscribio solo
+	TipoEsperaDescartada = "espera.descartada" // le tocaba, pero ya no se pudo inscribir (ver motivo)
+	TipoEsperaCancelada  = "espera.cancelada"  // el alumno salio de la fila
 )
 
 // Evento es el sobre comun de todos los mensajes (JSON en el value del
@@ -97,4 +104,19 @@ type MateriaCupo struct {
 	Nombre    string `json:"nombre"`
 	Cupo      int    `json:"cupo"`
 	Inscritos int    `json:"inscritos"`
+}
+
+// EsperaEvento: topico espera.eventos, llave = materia_id. Sirve para los
+// cuatro tipos de espera.*. Posicion solo viene en espera.registrada y Motivo
+// en espera.descartada.
+type EsperaEvento struct {
+	EsperaID      int    `json:"espera_id"`
+	AlumnoID      int    `json:"alumno_id"`
+	AlumnoNombre  string `json:"alumno_nombre,omitempty"`
+	AlumnoCorreo  string `json:"alumno_correo,omitempty"`
+	MateriaID     int    `json:"materia_id"`
+	MateriaClave  string `json:"materia_clave,omitempty"`
+	MateriaNombre string `json:"materia_nombre,omitempty"`
+	Posicion      int    `json:"posicion,omitempty"`
+	Motivo        string `json:"motivo,omitempty"`
 }

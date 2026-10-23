@@ -15,6 +15,7 @@ service InscripcionesService {
   //   PERMISSION_DENIED   la materia no es de la carrera del alumno
   //   ALREADY_EXISTS      ya esta inscrito
   //   FAILED_PRECONDITION sin cupo o materia ya cursada
+  //   ABORTED             el horario empalma con otra materia que ya tiene inscrita
   //   UNAVAILABLE         no se pudo consultar Alumnos o Materias
   rpc Inscribir(InscribirRequest) returns (Inscripcion);
 

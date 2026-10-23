@@ -8,6 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;1,500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="estilos.css">
+    <link rel="stylesheet" href="app.css">
 </head>
 <body class="en-login">
     <div class="login-bg" aria-hidden="true">
@@ -33,7 +34,10 @@
                 </label>
                 <label class="campo">
                     <span>Contraseña</span>
-                    <input id="login-password" type="password" placeholder="Tu contraseña" autocomplete="current-password" required>
+                    <div class="campo-pass">
+                        <input id="login-password" type="password" placeholder="Tu contraseña" autocomplete="current-password" required>
+                        <button type="button" class="ver-pass" data-ver="login-password" aria-label="Mostrar contraseña">Ver</button>
+                    </div>
                 </label>
                 <p id="error-login" class="error" role="alert"></p>
                 <button type="submit" class="btn-primary">Entrar</button>
@@ -50,7 +54,10 @@
                 </label>
                 <label class="campo">
                     <span>Contraseña</span>
-                    <input id="nuevo-password" type="password" placeholder="Crea una contraseña" autocomplete="new-password" required>
+                    <div class="campo-pass">
+                        <input id="nuevo-password" type="password" placeholder="Crea una contraseña" autocomplete="new-password" required>
+                        <button type="button" class="ver-pass" data-ver="nuevo-password" aria-label="Mostrar contraseña">Ver</button>
+                    </div>
                 </label>
                 <label class="campo">
                     <span>Carrera</span>
@@ -61,12 +68,12 @@
             </form>
 
             <details class="login-demos">
-                <summary>Cuentas de prueba</summary>
+                <summary>Cuentas de prueba (toca una para llenarla)</summary>
                 <ul>
-                    <li><strong>0250947@up.edu.mx</strong> / emilianoguillen90<br>Inteligencia de Datos y Ciberseguridad</li>
-                    <li><strong>0251001@up.edu.mx</strong> / marianalopez90<br>Mecatrónica</li>
-                    <li><strong>0251002@up.edu.mx</strong> / diegoramirez90<br>Ingeniería Industrial</li>
-                    <li><strong>0251003@up.edu.mx</strong> / anatorres90<br>Ingeniería Mecánica</li>
+                    <li><button type="button" class="demo" data-correo="0250947@up.edu.mx" data-pass="emilianoguillen90"><strong>0250947@up.edu.mx</strong><span>Inteligencia de Datos y Ciberseguridad</span></button></li>
+                    <li><button type="button" class="demo" data-correo="0251001@up.edu.mx" data-pass="marianalopez90"><strong>0251001@up.edu.mx</strong><span>Mecatrónica</span></button></li>
+                    <li><button type="button" class="demo" data-correo="0251002@up.edu.mx" data-pass="diegoramirez90"><strong>0251002@up.edu.mx</strong><span>Ingeniería Industrial</span></button></li>
+                    <li><button type="button" class="demo" data-correo="0251003@up.edu.mx" data-pass="anatorres90"><strong>0251003@up.edu.mx</strong><span>Ingeniería Mecánica</span></button></li>
                 </ul>
             </details>
         </article>
@@ -81,44 +88,101 @@
                     <h1>Armar horario</h1>
                 </div>
             </div>
+
             <nav class="app-nav" aria-label="Apartados">
                 <button type="button" class="nav-btn is-active" data-nav="horario">Mi horario</button>
                 <button type="button" class="nav-btn" data-nav="materias">Agregar materias</button>
+                <button type="button" class="nav-btn" data-nav="espera">Lista de espera <span id="badge-espera" class="badge-nav" hidden>0</span></button>
             </nav>
-            <div class="alumno-box">
-                <p id="nombre-alumno" class="alumno"></p>
-                <button id="btn-cambiar" type="button">Cerrar sesión</button>
-                <p id="carrera-alumno" class="carrera"></p>
+
+            <div class="topbar-der">
+                <div class="avisos-wrap">
+                    <button id="btn-avisos" type="button" class="icono-btn" aria-label="Avisos" aria-haspopup="true" aria-expanded="false">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+                        <span id="badge-avisos" class="badge-campana" hidden>0</span>
+                    </button>
+                    <div id="panel-avisos" class="panel-avisos" hidden role="region" aria-label="Avisos">
+                        <div class="panel-avisos-head">
+                            <strong>Tus avisos</strong>
+                            <span>en tiempo real</span>
+                        </div>
+                        <ul id="lista-avisos" class="lista-avisos"></ul>
+                    </div>
+                </div>
+                <div class="alumno-box">
+                    <p id="nombre-alumno" class="alumno"></p>
+                    <p id="carrera-alumno" class="carrera"></p>
+                </div>
+                <button id="btn-cambiar" type="button" class="btn-salir">Cerrar sesión</button>
             </div>
         </header>
 
         <main class="app-main">
-            <p id="mensaje" class="mensaje"></p>
-
+            <!-- ================= Mi horario ================= -->
             <section id="vista-horario" class="vista" data-vista="horario">
                 <div class="vista-head">
                     <p class="vista-kicker">Esta semana</p>
                     <div class="vista-title-row">
-                        <h2>Mi horario</h2>
-                        <p id="resumen-horario" class="resumen"></p>
+                        <h2 id="saludo">Mi horario</h2>
+                        <div class="acciones">
+                            <button type="button" id="btn-ics" class="btn btn-linea">Añadir a mi calendario</button>
+                            <button type="button" id="btn-imprimir" class="btn btn-linea">Imprimir</button>
+                        </div>
                     </div>
-                    <p class="ayuda">Tus clases de lunes a viernes. Da de baja una materia desde su bloque.</p>
                 </div>
+
+                <div id="tarjetas" class="tarjetas"></div>
+
                 <div class="calendario-wrap">
-                    <div id="calendario" class="calendario">Cargando horario...</div>
+                    <div id="calendario" class="cal"></div>
                 </div>
+                <div id="agenda" class="agenda"></div>
             </section>
 
+            <!-- ================= Agregar materias ================= -->
             <section id="vista-materias" class="vista" data-vista="materias" hidden>
                 <div class="vista-head">
                     <p class="vista-kicker">Catálogo</p>
                     <h2>Agregar materias</h2>
-                    <p id="titulo-catalogo" class="ayuda">Solo ves las de tu plan. El tronco común se comparte con otras ingenierías.</p>
+                    <p id="titulo-catalogo" class="ayuda"></p>
                 </div>
+
+                <div class="filtros">
+                    <label class="buscar">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                        <input id="buscar" type="search" placeholder="Buscar por clave, materia o profesor" autocomplete="off">
+                    </label>
+                    <select id="filtro-semestre" aria-label="Filtrar por semestre"></select>
+                </div>
+                <div id="chips" class="chips" role="group" aria-label="Filtrar por estado"></div>
+                <p id="conteo-materias" class="conteo"></p>
+
                 <div id="lista-materias" class="catalogo">Cargando...</div>
             </section>
+
+            <!-- ================= Lista de espera ================= -->
+            <section id="vista-espera" class="vista" data-vista="espera" hidden>
+                <div class="vista-head">
+                    <p class="vista-kicker">Materias llenas</p>
+                    <h2>Lista de espera</h2>
+                    <p class="ayuda">Si una materia ya no tiene cupo, anótate en su fila. En cuanto alguien se dé de baja te inscribimos automáticamente, sin que tengas que estar pendiente.</p>
+                </div>
+                <div id="lista-espera" class="espera-grid"></div>
+            </section>
         </main>
+
+        <footer class="pie">
+            <span id="pie-estado" class="pie-chip">Sistema distribuido</span>
+            <span class="pie-links">
+                <a href="http://localhost:8081" target="_blank" rel="noopener">API</a>
+                <a href="http://localhost:3001" target="_blank" rel="noopener">Métricas</a>
+                <a href="http://localhost:8500" target="_blank" rel="noopener">Consul</a>
+                <a href="http://localhost:8090" target="_blank" rel="noopener">Kafka</a>
+            </span>
+        </footer>
     </div>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
 
     <script src="app.js"></script>
 </body>

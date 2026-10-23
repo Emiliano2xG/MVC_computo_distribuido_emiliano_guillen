@@ -66,8 +66,12 @@ func (m *MateriaModel) GetByCarreraID(carreraID int) ([]Materia, error) {
 
 func (m *MateriaModel) GetByID(id int) (*Materia, error) {
 	item := &Materia{}
-	query := `SELECT id, clave, nombre, profesor, cupo, horario, dias, semestre FROM materias WHERE id = $1`
-	err := m.DB.QueryRow(query, id).Scan(&item.ID, &item.Clave, &item.Nombre, &item.Profesor, &item.Cupo, &item.Horario, &item.Dias, &item.Semestre)
+	query := `
+		SELECT m.id, m.clave, m.nombre, m.profesor, m.cupo,
+		       (SELECT COUNT(*) FROM inscripciones i WHERE i.materia_id = m.id AND i.estado = 'inscrita'),
+		       m.horario, m.dias, m.semestre
+		FROM materias m WHERE m.id = $1`
+	err := m.DB.QueryRow(query, id).Scan(&item.ID, &item.Clave, &item.Nombre, &item.Profesor, &item.Cupo, &item.Inscritos, &item.Horario, &item.Dias, &item.Semestre)
 	if err != nil {
 		return nil, err
 	}

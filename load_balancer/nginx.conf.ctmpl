@@ -11,10 +11,32 @@
 # ---------------------------------------------------------------------------
 log_format gateway '$remote_addr [$time_local] "$request" $status '
                    'upstream=$upstream_addr upstream_status=$upstream_status '
-                   'rt=$request_time urt=$upstream_response_time';
+                   'rt=$request_time urt=$upstream_response_time req_id=$request_id';
 
 access_log /dev/stdout gateway;
 error_log  /dev/stderr warn;
+
+# ---------------------------------------------------------------------------
+# Proteccion del gateway
+#
+# Rate limiting: cada IP puede hacer 50 peticiones por segundo sostenidas, con
+# una rafaga de hasta 100 mas (ver `limit_req` en el server :8000). Pasando eso
+# nginx responde 429 sin molestar a los backends. Evita que un cliente
+# descontrolado (o un ataque simple) tumbe todo el sistema.
+# La zona guarda el estado de ~160 mil IPs en 10 MB de memoria compartida.
+# ---------------------------------------------------------------------------
+# /heartbeat y /status quedan fuera: nginx no cuenta las peticiones cuya
+# llave esta vacia (las usan el health check del contenedor y Prometheus).
+map $request_uri $llave_limite {
+    ~^/(heartbeat|status)$  "";
+    default                 $binary_remote_addr;
+}
+limit_req_zone $llave_limite zone=api_por_ip:10m rate=50r/s;
+
+# Compresion de las respuestas JSON (el catalogo de materias pesa bastante).
+gzip            on;
+gzip_min_length 512;
+gzip_types      application/json text/plain;
 
 # ---------------------------------------------------------------------------
 # Upstreams dinamicos: Consul es el service registry.
@@ -57,6 +79,24 @@ upstream notificaciones_backend {
     server 127.0.0.1:65535 down;
 {{- end }}
 }
+upstream espera_backend {
+    zone espera_backend 64k;
+{{- range service "espera" }}
+    server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
+}
+
+upstream auditoria_backend {
+    zone auditoria_backend 64k;
+{{- range service "auditoria" }}
+    server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
+}
+
 # ---------------------------------------------------------------------------
 # Upstreams gRPC (puerto 9090 de cada replica). En Consul son los servicios
 # "<nombre>-grpc", con health check del protocolo grpc.health.v1.
@@ -108,7 +148,8 @@ server {
     grpc_next_upstream_tries   3;
     grpc_next_upstream_timeout 10s;
 
-    grpc_set_header X-Real-IP $remote_addr;
+    grpc_set_header X-Real-IP    $remote_addr;
+    grpc_set_header X-Request-Id $request_id;
 
     location /horarios.materias.v1.MateriasService/ {
         grpc_pass grpc://materias_grpc;
@@ -142,6 +183,14 @@ server {
     proxy_set_header X-Real-IP         $remote_addr;
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
+    # Id unico por peticion: viaja al backend y vuelve al cliente, para poder
+    # seguir una misma peticion en los logs de nginx y de la replica.
+    proxy_set_header X-Request-Id      $request_id;
+
+    # --- Rate limiting (ver limit_req_zone arriba) ------------------------
+    limit_req        zone=api_por_ip burst=100 nodelay;
+    limit_req_status 429;
+    error_page       429 = @demasiadas_peticiones;
 
     # Un backend caido (contenedor detenido) no debe colgar la peticion:
     proxy_connect_timeout 2s;
@@ -159,19 +208,32 @@ server {
     add_header Access-Control-Allow-Origin   "*" always;
     add_header Access-Control-Allow-Methods  "GET, POST, DELETE, OPTIONS" always;
     add_header Access-Control-Allow-Headers  "Content-Type" always;
-    add_header Access-Control-Expose-Headers "X-Instance-Id, X-Upstream" always;
+    add_header Access-Control-Expose-Headers "X-Instance-Id, X-Upstream, X-Request-Id" always;
     # Replica de nginx que atendio (util para demostrar el balanceo)
     add_header X-Upstream $upstream_addr always;
+    add_header X-Request-Id $request_id always;
+
+    # --- Cabeceras de seguridad -------------------------------------------
+    add_header X-Content-Type-Options "nosniff" always;   # el navegador no adivina el tipo de contenido
+    add_header X-Frame-Options        "DENY" always;      # nadie puede meter el sitio en un iframe
+    add_header Referrer-Policy        "no-referrer" always;
 
     # --- Endpoints propios del gateway ------------------------------------
+    # (sin rate limit: los usa el health check del contenedor y Prometheus)
     location = /heartbeat {
         default_type text/plain;
         return 200 "gateway alive";
     }
 
-    # Metricas de nginx (conexiones activas, peticiones atendidas)
+    # Metricas de nginx (conexiones activas, peticiones atendidas).
+    # nginx_exporter lo traduce a formato Prometheus.
     location = /status {
         stub_status;
+    }
+
+    location @demasiadas_peticiones {
+        default_type application/json;
+        return 429 '{"error":"demasiadas peticiones, intenta de nuevo en un momento"}';
     }
 
     # --- Rutas hacia los servicios ----------------------------------------
@@ -194,6 +256,17 @@ server {
         if ($request_method = OPTIONS) { return 204; }
         proxy_pass http://notificaciones_backend;
     }
+
+    location /espera {
+        if ($request_method = OPTIONS) { return 204; }
+        proxy_pass http://espera_backend;
+    }
+
+    location /auditoria {
+        if ($request_method = OPTIONS) { return 204; }
+        proxy_pass http://auditoria_backend;
+    }
+
     location / {
         default_type application/json;
         return 404 '{"error":"ruta no encontrada en el gateway"}';

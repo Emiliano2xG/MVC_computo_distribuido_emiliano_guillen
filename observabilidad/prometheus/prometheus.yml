@@ -1,0 +1,36 @@
+# Prometheus: recoge las metricas (GET /metrics) de todas las replicas.
+#
+# No hay IPs escritas a mano: igual que el gateway nginx, Prometheus le
+# pregunta a Consul que instancias existen (consul_sd_configs). Si se levanta
+# una replica nueva aparece sola en un par de segundos; si se cae, su serie
+# `up` pasa a 0 y luego desaparece cuando Consul la da de baja.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Los servicios de negocio (materias, alumnos, inscripciones, notificaciones, auditoria).
+  - job_name: servicios
+    consul_sd_configs:
+      - server: consul:8500
+        refresh_interval: 5s
+    relabel_configs:
+      # Cada replica esta registrada dos veces en Consul: "<nombre>" (HTTP) y
+      # "<nombre>-grpc". /metrics vive en el puerto HTTP, asi que solo las
+      # que llevan la etiqueta "http". Consul tambien se lista a si mismo; esto
+      # lo descarta (no tiene la etiqueta).
+      - source_labels: [__meta_consul_tags]
+        regex: .*,http,.*
+        action: keep
+      - source_labels: [__meta_consul_service]
+        target_label: servicio
+      - source_labels: [__meta_consul_service_id]
+        target_label: instance
+
+  # nginx no habla Prometheus; el exporter traduce su /status (stub_status).
+  - job_name: gateway
+    static_configs:
+      - targets: ["nginx_exporter:9113"]
+        labels:
+          servicio: gateway
+          instance: gateway-nginx

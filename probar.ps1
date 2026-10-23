@@ -354,12 +354,89 @@ try {
     $grupos = docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --all-groups 2>$null | Out-String
     $lagMax = 0
     foreach ($l in ($grupos -split "`n")) {
-        if ($l -match "^(materias-cupos|notificaciones)\s+\S+\s+\d+\s+(\d+|-)\s+(\d+)\s+(\d+)") { $lagMax = [Math]::Max($lagMax, [int]$Matches[4]) }
+        if ($l -match "^(materias-cupos|notificaciones|auditoria)\s+\S+\s+\d+\s+(\d+|-)\s+(\d+)\s+(\d+)") { $lagMax = [Math]::Max($lagMax, [int]$Matches[4]) }
     }
-    if (($grupos -match "materias-cupos") -and ($grupos -match "notificaciones") -and $lagMax -eq 0) {
-        Pass "Kafka: grupos materias-cupos y notificaciones activos con lag 0"
+    if (($grupos -match "materias-cupos") -and ($grupos -match "notificaciones") -and ($grupos -match "auditoria") -and $lagMax -eq 0) {
+        Pass "Kafka: grupos materias-cupos, notificaciones y auditoria activos con lag 0"
     } else { Fail "Kafka grupos/lag=$lagMax" }
 } catch { Fail "Kafka consumer groups" }
+
+# ---- Auditoria (bitacora de eventos en Postgres) ----
+function EsperarAuditoria($tipo, $patron, $seg = 20) {
+    for ($i = 0; $i -lt ($seg * 2); $i++) {
+        $a = @(Invoke-RestMethod "$api/auditoria?tipo=$tipo&limit=200") | Where-Object { ($_.datos | ConvertTo-Json -Compress) -match $patron }
+        if ($a) { return ($a | Select-Object -First 1) }
+        Start-Sleep -Milliseconds 500
+    }
+    return $null
+}
+
+try {
+    $na = ConsulPassing "auditoria"
+    if ($na -eq 2) { Pass "Consul registry: auditoria con 2 replicas healthy (grupo de consumidores)" } else { Fail "Consul auditoria=$na (se esperaban 2)" }
+} catch { Fail "Consul auditoria" }
+
+try {
+    $ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $c = Post "$api/alumnos" @{nombre="Alumno Audit $ts"; matricula="U$ts"; correo="audit$ts@up.edu.mx"; password="kafka123"; carrera_id=1}
+    $reg = EsperarAuditoria "alumno.creado" ([regex]::Escape("U$ts"))
+    if ($c -eq 201 -and $reg -and $reg.topico -eq "alumnos.eventos" -and $reg.procesado_por -match "^auditoria-[12]$") {
+        Pass "Auditoria: alumno.creado quedo guardado en Postgres (lo guardo $($reg.procesado_por))"
+    } else { Fail "Auditoria: no aparecio alumno.creado (status=$c)" }
+
+    $res = Invoke-RestMethod "$api/auditoria/resumen"
+    if ($res.total -ge 1 -and $res.por_tipo.'alumno.creado' -ge 1) { Pass "Auditoria: resumen con $($res.total) eventos guardados" } else { Fail "Auditoria resumen: $($res | ConvertTo-Json -Compress)" }
+
+    $ids = @(Invoke-RestMethod "$api/auditoria?limit=500" | ForEach-Object { $_.evento_id })
+    if ($ids.Count -eq @($ids | Sort-Object -Unique).Count) { Pass "Auditoria: ningun evento duplicado (consumidor idempotente)" } else { Fail "Auditoria: hay eventos duplicados" }
+} catch { Fail "auditoria: $($_.Exception.Message)" }
+
+# ---- Observabilidad: Prometheus + Grafana + Swagger ----
+try {
+    $tg = (Invoke-RestMethod "http://localhost:9091/api/v1/targets").data.activeTargets
+    $arriba = @($tg | Where-Object { $_.health -eq "up" -and $_.labels.job -eq "servicios" }).Count
+    if ($arriba -ge 12) { Pass "Prometheus: descubrio $arriba replicas por Consul y las raspa (up)" } else { Fail "Prometheus targets arriba=$arriba (se esperaban 12)" }
+    $q = (Invoke-RestMethod ("http://localhost:9091/api/v1/query?query=" + [uri]::EscapeDataString("sum(http_peticiones_total)"))).data.result
+    if ($q -and [double]$q[0].value[1] -gt 0) { Pass "Prometheus: hay metricas HTTP de los servicios (http_peticiones_total)" } else { Fail "Prometheus sin metricas HTTP" }
+} catch { Fail "Prometheus: $($_.Exception.Message)" }
+
+try {
+    $g = Invoke-RestMethod "http://localhost:3001/api/health"
+    $d = @(Invoke-RestMethod "http://localhost:3001/api/search?query=Horarios")
+    if ($g.database -eq "ok" -and $d.Count -ge 1) { Pass "Grafana: arriba con el dashboard '$($d[0].title)' provisionado" } else { Fail "Grafana health=$($g.database) dashboards=$($d.Count)" }
+} catch { Fail "Grafana: $($_.Exception.Message)" }
+
+try {
+    $sw = Invoke-WebRequest "http://localhost:8081/openapi.yaml" -UseBasicParsing
+    $swUi = Invoke-WebRequest "http://localhost:8081" -UseBasicParsing
+    if ($sw.StatusCode -eq 200 -and $sw.Content -match "Horarios UP" -and $swUi.StatusCode -eq 200) { Pass "Swagger UI: documentacion de la API en :8081" } else { Fail "Swagger UI incompleto" }
+} catch { Fail "Swagger UI: $($_.Exception.Message)" }
+
+# ---- Gateway: cabeceras, /metrics oculto y rate limiting ----
+try {
+    $h = Invoke-WebRequest "$api/materias" -UseBasicParsing
+    $rid = "$($h.Headers['X-Request-Id'])"
+    $rid2 = "$((Invoke-WebRequest "$api/materias" -UseBasicParsing).Headers['X-Request-Id'])"
+    if ($rid -match "^[0-9a-f]{32}$" -and $rid -ne $rid2 -and "$($h.Headers['X-Content-Type-Options'])" -eq "nosniff") {
+        Pass "Gateway: X-Request-Id unico por peticion y cabeceras de seguridad"
+    } else { Fail "Gateway cabeceras: rid=$rid rid2=$rid2" }
+} catch { Fail "Gateway cabeceras: $($_.Exception.Message)" }
+
+try {
+    $m = curl.exe -s -o NUL -w "%{http_code}" "$api/metrics"
+    if ($m -eq "404") { Pass "Gateway: /metrics no se expone al exterior (404)" } else { Fail "/metrics por el gateway = $m" }
+} catch { Fail "Gateway /metrics" }
+
+try {
+    $curlArgs = @("-s", "--parallel", "--parallel-max", "200", "-w", "%{http_code}`n")
+    1..400 | ForEach-Object { $curlArgs += @("-o", "NUL", "$api/alumnos/carreras") }
+    $codigos = & curl.exe @curlArgs
+    $n429 = @($codigos | Where-Object { $_ -eq "429" }).Count
+    Start-Sleep -Seconds 3
+    $despues = curl.exe -s -o NUL -w "%{http_code}" "$api/alumnos/carreras"
+    if ($n429 -ge 1 -and $despues -eq "200") { Pass "Gateway: rate limiting, una rafaga de 400 peticiones recibio $n429 respuestas 429 y luego se recupero" } else { Fail "Rate limit: 429=$n429 despues=$despues" }
+} catch { Fail "Rate limit: $($_.Exception.Message)" }
+Start-Sleep -Seconds 2
 
 $cuantas = 21
 $jobs = 1..$cuantas | ForEach-Object {
@@ -433,7 +510,114 @@ else {
         $c = Post "$api/alumnos" @{nombre="Alumno Recuperado $ts"; matricula="R$ts"; correo="recuperado$ts@up.edu.mx"; password="kafka123"; carrera_id=1}
         $ev = EsperarEvento "alumno.creado" ([regex]::Escape("R$ts")) $previos 40
         if ($c -eq 201 -and $ev) { Pass "Kafka recuperado: productores y consumidores se reconectaron solos" } else { Fail "Kafka recuperado: status=$c evento=$([bool]$ev)" }
+        $reg = EsperarAuditoria "alumno.creado" ([regex]::Escape("R$ts")) 40
+        if ($reg) { Pass "Kafka recuperado: auditoria tambien guardo el evento nuevo" } else { Fail "auditoria no guardo el evento tras recuperar Kafka" }
     } catch { Fail "recuperacion de Kafka: $($_.Exception.Message)" }
+}
+
+# ---- Funciones nuevas para el alumno: empalme de horarios y lista de espera ----
+# Invoke-RestMethod (PowerShell 5.1) entrega un arreglo JSON como un solo objeto; asi se aplana.
+function Lista($uri) { Invoke-RestMethod $uri | ForEach-Object { $_ } }
+try {
+    $ne = ConsulPassing "espera"
+    if ($ne -eq 1) { Pass "Consul registry: espera (lista de espera + consumidor Kafka) healthy" } else { Fail "Consul espera=$ne" }
+} catch { Fail "Consul espera" }
+
+try {
+    $tsE = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $correoE = "empalme$tsE@up.edu.mx"
+    $nuevo = Invoke-RestMethod "$api/alumnos" -Method POST -ContentType "application/json" `
+        -Body (@{nombre="Alumno Empalme $tsE"; matricula="E$tsE"; correo=$correoE; password="empalme123"; carrera_id=1} | ConvertTo-Json -Compress)
+    $plan = @(Lista "$api/materias?carrera_id=1")
+    $mA = $plan | Where-Object { $_.clave -eq "MAT31051" } | Select-Object -First 1   # Lun y Mie 07:00-08:30
+    $mB = $plan | Where-Object { $_.clave -eq "MAT31075" } | Select-Object -First 1   # Lun y Mie 07:00-08:30
+    $mC = $plan | Where-Object { $_.clave -eq "MAT31072" } | Select-Object -First 1   # Mar y Jue 08:00-09:30
+    $c1 = Post "$api/inscripciones" @{alumno_id=$nuevo.id; materia_id=$mA.id}
+    $c2 = Post "$api/inscripciones" @{alumno_id=$nuevo.id; materia_id=$mB.id}
+    $c3 = Post "$api/inscripciones" @{alumno_id=$nuevo.id; materia_id=$mC.id}
+    if ($c1 -eq 201 -and $c2 -eq 409 -and $c3 -eq 201) {
+        Pass "Empalme: la segunda materia con el mismo horario recibe 409 y una de otro dia se acepta"
+    } else { Fail "Empalme: alta1=$c1 (201) empalmada=$c2 (409) otro dia=$c3 (201)" }
+
+    $msgE = ""
+    try { Invoke-WebRequest "$api/inscripciones" -Method POST -ContentType "application/json" -UseBasicParsing `
+            -Body (@{alumno_id=$nuevo.id; materia_id=$mB.id} | ConvertTo-Json -Compress) | Out-Null }
+    catch { $msgE = $_.ErrorDetails.Message }
+    if ($msgE -match "empalma" -and $msgE -match "MAT31051") { Pass "Empalme: el error dice con que materia choca" } else { Fail "mensaje de empalme: $msgE" }
+
+    if ($grpcurl) {
+        $gr = Grpc "inscripciones.proto" ("{`"alumno_id`":$($nuevo.id),`"materia_id`":$($mB.id)}") "horarios.inscripciones.v1.InscripcionesService/Inscribir"
+        if ("$gr" -match "Aborted") { Pass "Empalme: por gRPC se traduce a Aborted" } else { Fail "Empalme gRPC: $gr" }
+    }
+} catch { Fail "empalme: $($_.Exception.Message)" }
+
+if ($tll) {
+    try {
+        $tsW = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $correoW = "espera$tsW@up.edu.mx"
+        $alW = Invoke-RestMethod "$api/alumnos" -Method POST -ContentType "application/json" `
+            -Body (@{nombre="Alumno Espera $tsW"; matricula="W$tsW"; correo=$correoW; password="espera123"; carrera_id=1} | ConvertTo-Json -Compress)
+
+        $ex = Invoke-RestMethod "$api/espera" -Method POST -ContentType "application/json" `
+            -Body (@{alumno_id=$alW.id; materia_id=$tll.id} | ConvertTo-Json -Compress)
+        $dup = Post "$api/espera" @{alumno_id=$alW.id; materia_id=$tll.id}
+        if ($ex.posicion -eq 1 -and $ex.estado -eq "esperando" -and $dup -eq 409) {
+            Pass "Espera: el alumno entra a la fila de TLL-001 en el lugar 1 y no puede anotarse dos veces"
+        } else { Fail "Espera: posicion=$($ex.posicion) estado=$($ex.estado) duplicado=$dup" }
+
+        $libre = $plan | Where-Object { $_.cupo -gt $_.inscritos -and $_.clave -ne "MAT31051" } | Select-Object -First 1
+        $rechazo = Post "$api/espera" @{alumno_id=$alW.id; materia_id=$libre.id}
+        if ($rechazo -eq 409) { Pass "Espera: no deja anotarse en una materia que todavia tiene lugares (409)" } else { Fail "Espera materia con lugar status=$rechazo" }
+
+        $evR = $null
+        for ($i = 0; $i -lt 40; $i++) {
+            $evR = @(Lista "$api/notificaciones?destinatario=$correoW&limit=50") | Where-Object { $_.tipo -eq "espera.registrada" } | Select-Object -First 1
+            if ($evR) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        $soloSuyas = @(Lista "$api/notificaciones?destinatario=$correoW&limit=50") | Where-Object { $_.destinatario -ne $correoW }
+        if ($evR -and -not $soloSuyas) { Pass "Notificaciones: ?destinatario= devuelve solo los avisos de ese alumno (espera.registrada)" } else { Fail "notificaciones por destinatario: evento=$([bool]$evR) ajenas=$(@($soloSuyas).Count)" }
+
+        # Alguien libera TLL-001: el primero de la fila debe quedar inscrito solo.
+        $duenoE = $null
+        foreach ($a in 1..6) {
+            $x = @(Lista "$api/inscripciones?alumno_id=$a") | Where-Object { $_.materia_id -eq $tll.id -and $_.estado -eq "inscrita" } | Select-Object -First 1
+            if ($x) { $duenoE = @{ alumno = $a; id = $x.id } }
+        }
+        if (-not $duenoE) { Fail "nadie inscrito en TLL-001 para probar la promocion" }
+        else {
+            Invoke-WebRequest "$api/inscripciones/$($duenoE.id)" -Method DELETE -UseBasicParsing | Out-Null
+            $promovida = $null
+            for ($i = 0; $i -lt 40; $i++) {
+                $promovida = @(Lista "$api/inscripciones?alumno_id=$($alW.id)") | Where-Object { $_.materia_id -eq $tll.id -and $_.estado -eq "inscrita" } | Select-Object -First 1
+                if ($promovida) { break }
+                Start-Sleep -Milliseconds 500
+            }
+            $filaVacia = @(Lista "$api/espera?alumno_id=$($alW.id)")
+            if ($promovida -and $filaVacia.Count -eq 0) {
+                Pass "Espera: al liberarse un lugar, el primero de la fila queda inscrito automaticamente (Kafka + gRPC)"
+            } else { Fail "Espera promocion: inscrito=$([bool]$promovida) filas=$($filaVacia.Count)" }
+
+            $evP = $null
+            for ($i = 0; $i -lt 40; $i++) {
+                $evP = @(Lista "$api/notificaciones?destinatario=$correoW&limit=50") | Where-Object { $_.tipo -eq "espera.promovida" } | Select-Object -First 1
+                if ($evP) { break }
+                Start-Sleep -Milliseconds 500
+            }
+            if ($evP) { Pass "Espera: el alumno recibe el aviso espera.promovida" } else { Fail "no llego espera.promovida" }
+
+            # Dejar todo como estaba: el alumno de prueba suelta TLL-001 y regresa su dueno original.
+            if ($promovida) { Invoke-WebRequest "$api/inscripciones/$($promovida.id)" -Method DELETE -UseBasicParsing | Out-Null }
+            Start-Sleep -Seconds 3
+            Post "$api/inscripciones" @{alumno_id=$duenoE.alumno; materia_id=$tll.id} | Out-Null
+        }
+    } catch {
+        Fail "lista de espera: $($_.Exception.Message)"
+        # No dejar al alumno de prueba formado: se llevaria el siguiente lugar que se libere.
+        try {
+            foreach ($f in @(Lista "$api/espera?alumno_id=$($alW.id)")) { Invoke-WebRequest "$api/espera/$($f.id)" -Method DELETE -UseBasicParsing | Out-Null }
+        } catch { }
+    }
 }
 
 Write-Host ""

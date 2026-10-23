@@ -84,9 +84,11 @@ func (p *Productor) Publicar(topic, key, tipo string, datos any) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := p.w.WriteMessages(ctx, msg); err != nil {
+			kafkaPublicados.WithLabelValues(topic, tipo, "error").Inc()
 			log.Printf("kafka: ERROR publicando %s en %s (key=%s): %v", tipo, topic, key, err)
 			return
 		}
+		kafkaPublicados.WithLabelValues(topic, tipo, "ok").Inc()
 		log.Printf("kafka: publicado %s en %s (key=%s id=%s)", tipo, topic, key, ev.ID)
 	}()
 }
@@ -165,6 +167,7 @@ func procesar(ctx context.Context, groupID string, h Handler, topic string, ev E
 	var err error
 	for intento := 1; intento <= 3; intento++ {
 		if err = h(ctx, topic, ev); err == nil {
+			kafkaConsumidos.WithLabelValues(groupID, topic, ev.Tipo, "ok").Inc()
 			return
 		}
 		log.Printf("kafka: group=%s fallo %s id=%s (intento %d/3): %v", groupID, ev.Tipo, ev.ID, intento, err)
@@ -174,5 +177,6 @@ func procesar(ctx context.Context, groupID string, h Handler, topic string, ev E
 			return
 		}
 	}
+	kafkaConsumidos.WithLabelValues(groupID, topic, ev.Tipo, "descartado").Inc()
 	log.Printf("kafka: group=%s DESCARTADO %s id=%s tras 3 intentos: %v", groupID, ev.Tipo, ev.ID, err)
 }

@@ -23,7 +23,7 @@ func main() {
 		instanceID = "notificaciones"
 	}
 
-	store := NewStore(200)
+	store := NewStore(1000)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -36,7 +36,7 @@ func main() {
 			return
 		}
 		limite, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		lista, total := store.Ultimas(limite)
+		lista, total := store.Ultimas(limite, r.URL.Query().Get("destinatario"))
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Instance-Id", instanceID)
 		w.Header().Set("X-Total-Recibidas", strconv.Itoa(total))

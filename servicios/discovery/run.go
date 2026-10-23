@@ -40,7 +40,9 @@ func unaryInterceptor(instanceID string) grpc.UnaryServerInterceptor {
 		start := time.Now()
 		_ = grpc.SetHeader(ctx, metadata.Pairs("x-instance-id", instanceID))
 		resp, err := h(ctx, req)
-		log.Printf("grpc %s code=%s dur=%s", info.FullMethod, status.Code(err), time.Since(start).Round(time.Microsecond))
+		dur := time.Since(start)
+		registrarGRPC(info.FullMethod, status.Code(err).String(), dur)
+		log.Printf("grpc %s code=%s dur=%s", info.FullMethod, status.Code(err), dur.Round(time.Microsecond))
 		return resp, err
 	}
 }
@@ -61,7 +63,8 @@ func Run(cfg Config) error {
 	grpcAddr := fmt.Sprintf(":%d", grpcPort)
 	conGRPC := cfg.RegisterGRPC != nil
 
-	httpSrv := &http.Server{Addr: httpAddr, Handler: cfg.Handler}
+	// Todos los servicios exponen /metrics y miden sus peticiones sin tocar su codigo.
+	httpSrv := &http.Server{Addr: httpAddr, Handler: ConMetricas(cfg.Handler)}
 	errCh := make(chan error, 2)
 
 	var (

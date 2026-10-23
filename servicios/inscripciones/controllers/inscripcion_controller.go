@@ -60,7 +60,7 @@ func (c *InscripcionController) InscripcionesHandler(w http.ResponseWriter, r *h
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		if errors.Is(err, models.ErrSinCupo) || errors.Is(err, models.ErrYaInscrito) || errors.Is(err, models.ErrYaCursada) {
+		if errors.Is(err, models.ErrSinCupo) || errors.Is(err, models.ErrYaInscrito) || errors.Is(err, models.ErrYaCursada) || errors.Is(err, models.ErrEmpalme) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}

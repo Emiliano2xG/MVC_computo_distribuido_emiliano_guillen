@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,14 +43,19 @@ func NewStore(max int) *Store {
 }
 
 // Ultimas devuelve hasta n notificaciones, de la mas reciente a la mas vieja.
-func (s *Store) Ultimas(n int) ([]Notificacion, int) {
+// Con destinatario != "" solo las de esa persona (asi el alumno ve unicamente
+// las suyas en la pagina). El total siempre es el de todas las recibidas.
+func (s *Store) Ultimas(n int, destinatario string) ([]Notificacion, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if n <= 0 || n > len(s.lista) {
 		n = len(s.lista)
 	}
 	out := make([]Notificacion, 0, n)
-	for i := len(s.lista) - 1; i >= len(s.lista)-n; i-- {
+	for i := len(s.lista) - 1; i >= 0 && len(out) < n; i-- {
+		if destinatario != "" && !strings.EqualFold(s.lista[i].Destinatario, destinatario) {
+			continue
+		}
 		out = append(out, s.lista[i])
 	}
 	return out, s.total
@@ -126,6 +132,28 @@ func (s *Store) Manejar(ctx context.Context, topic string, ev mensajeria.Evento)
 		}
 		n.Destinatario = coordinacion
 		n.Mensaje = fmt.Sprintf("Se libero un lugar en %s - %s (%d/%d).", d.Clave, d.Nombre, d.Inscritos, d.Cupo)
+
+	case mensajeria.TipoEsperaRegistrada, mensajeria.TipoEsperaPromovida,
+		mensajeria.TipoEsperaDescartada, mensajeria.TipoEsperaCancelada:
+		var d mensajeria.EsperaEvento
+		if err := ev.Decodificar(&d); err != nil {
+			return nil
+		}
+		n.Destinatario = d.AlumnoCorreo
+		if n.Destinatario == "" {
+			n.Destinatario = fmt.Sprintf("alumno-%d", d.AlumnoID)
+		}
+		materia := d.MateriaClave + " - " + d.MateriaNombre
+		switch ev.Tipo {
+		case mensajeria.TipoEsperaRegistrada:
+			n.Mensaje = fmt.Sprintf("Quedaste en la lista de espera de %s (lugar %d). Si se libera un lugar te inscribimos automaticamente.", materia, d.Posicion)
+		case mensajeria.TipoEsperaPromovida:
+			n.Mensaje = fmt.Sprintf("Se libero un lugar en %s y te inscribimos automaticamente desde la lista de espera.", materia)
+		case mensajeria.TipoEsperaDescartada:
+			n.Mensaje = fmt.Sprintf("Te tocaba entrar a %s, pero no pudimos inscribirte: %s.", materia, d.Motivo)
+		case mensajeria.TipoEsperaCancelada:
+			n.Mensaje = fmt.Sprintf("Saliste de la lista de espera de %s.", materia)
+		}
 
 	default:
 		log.Printf("notificaciones: evento desconocido %q (id=%s), se ignora", ev.Tipo, ev.ID)

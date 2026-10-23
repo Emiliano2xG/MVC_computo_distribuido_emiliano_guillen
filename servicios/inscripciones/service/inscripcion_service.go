@@ -5,6 +5,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -70,8 +71,9 @@ func replica(hdr metadata.MD) string {
 //  1. alumnos.GetAlumno                      -> existe y de que carrera es
 //  2. materias.GetMateria                    -> existe
 //  3. materias.MateriaPerteneceACarrera      -> es de su carrera (si no, 403)
-//  4. guarda en la base (duplicado, cupo)
-//  5. publica inscripcion.creada en Kafka (asincrono, no bloquea la respuesta)
+//  4. revisa que no se empalme con lo que el alumno ya tiene inscrito
+//  5. guarda en la base (duplicado, cupo)
+//  6. publica inscripcion.creada en Kafka (asincrono, no bloquea la respuesta)
 func (s *InscripcionService) Inscribir(ctx context.Context, alumnoID, materiaID int) (*models.Inscripcion, error) {
 	var hdr metadata.MD
 
@@ -105,6 +107,21 @@ func (s *InscripcionService) Inscribir(ctx context.Context, alumnoID, materiaID 
 		materiaID, alumno.GetCarreraId(), res.GetPertenece(), replica(hdr))
 	if !res.GetPertenece() {
 		return nil, models.ErrOtraCarrera
+	}
+
+	// 4. Empalme de horario contra lo que el alumno ya tiene inscrito.
+	actuales, err := s.Model.GetByAlumnoID(alumnoID)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range actuales {
+		if a.Estado == "cursada" || a.MateriaID == materiaID {
+			continue // lo ya cursado no ocupa horario; la misma materia la rechaza Create (ya inscrito)
+		}
+		if Empalman(materia.GetHorario(), materia.GetDias(), a.Horario, a.Dias) {
+			log.Printf("inscripciones: alta de %s rechazada, empalma con %s", materia.GetClave(), a.Clave)
+			return nil, fmt.Errorf("%w: %s - %s (%s %s)", models.ErrEmpalme, a.Clave, a.Materia, a.Dias, a.Horario)
+		}
 	}
 
 	item, err := s.Model.Create(alumnoID, materiaID)

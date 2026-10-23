@@ -15,7 +15,9 @@ Todo el trafico del navegador pasa por un reverse proxy / gateway **nginx** (que
 | 3. Gateway nginx | nginx reemplaza al MLB: reverse proxy + load balancer en su propio contenedor, CORS, `/heartbeat`, `/status`, health check pasivo. | `load_balancer/` |
 | 4. Consul | Service discovery dinamico: registro y baja en el service registry, health check HTTP, Consul en su propio contenedor, nginx con upstreams dinamicos (consul-template). | `servicios/discovery`, `load_balancer/nginx.conf.ctmpl` |
 | 5. gRPC + protobuf | Contratos `.proto`, servidor gRPC en cada backend (puerto 9090), comunicacion entre servicios por gRPC (`inscripciones` -> `alumnos` / `materias`), gateway gRPC en nginx (:9000) y pruebas con `grpcurl`. | `servicios/proto`, `servicios/pb`, `servicios/*/grpcserver`, `servicios/inscripciones/{clients,service}` |
-| 6. Kafka (esta entrega) | Cola de mensajeria asincrona con Apache Kafka (KRaft, contenedor propio). Un topico por servicio (`alumnos.eventos`, `materias.eventos`, `inscripciones.eventos`), productores en los backends, consumidores con grupo (`materias-cupos`, `notificaciones`), servicio nuevo `notificaciones` y Kafka UI. | `servicios/mensajeria`, `servicios/materias/cupos`, `servicios/notificaciones`, `docker-compose.yml` |
+| 6. Kafka | Cola de mensajeria asincrona con Apache Kafka (KRaft, contenedor propio). Un topico por servicio (`alumnos.eventos`, `materias.eventos`, `inscripciones.eventos`), productores en los backends, consumidores con grupo (`materias-cupos`, `notificaciones`), servicio nuevo `notificaciones` y Kafka UI. | `servicios/mensajeria`, `servicios/materias/cupos`, `servicios/notificaciones`, `docker-compose.yml` |
+| 7. Extras de produccion | **Observabilidad** (Prometheus + Grafana, descubren las replicas por Consul), servicio **`auditoria`** (bitacora permanente de eventos en Postgres, 2 replicas en un grupo de Kafka), **Swagger UI** con la API documentada (OpenAPI) y un gateway mas robusto (**rate limiting**, `X-Request-Id`, gzip, cabeceras de seguridad). | `observabilidad/`, `servicios/auditoria`, `servicios/discovery/metrics.go`, `docs/openapi.yaml`, `load_balancer/` |
+| 8. Experiencia del alumno | Pagina rediseñada y servicio nuevo **`espera`**. El alumno ve su semana en un **calendario** con resumen (materias, horas, proxima clase, avance de carrera), **busca y filtra** el catalogo, ve **cuantos lugares quedan**, y la pagina le avisa si una materia **empalma** con su horario (el servidor tambien lo rechaza con 409 / gRPC `Aborted`). Si una materia esta llena se puede **anotar en una lista de espera**: cuando alguien se da de baja, `espera` (que escucha `materia.cupo_liberado` en Kafka) lo inscribe solo por gRPC y le llega un **aviso en vivo** (campana + notificacion emergente). Tambien exporta el horario a **.ics** (Google/Outlook/Apple Calendar) y se imprime. | `frontend/`, `servicios/espera`, `servicios/inscripciones/service/horario.go`, `servicios/notificaciones` |
 
 El REST sigue igual para el frontend (los navegadores no hablan gRPC). gRPC es la comunicacion **sincrona** entre servicios (pregunto y espero respuesta) y Kafka la **asincrona** (aviso que paso algo y sigo, quien le interese lo procesa despues).
 
@@ -43,6 +45,12 @@ grpcurl   -> load_balancer :9000  (gRPC/HTTP2) --+--> upstreams armados con el c
                               |                                              |
                               v (grupo "materias-cupos")                     |
                          materias x3 -- materia.cupo_agotado / cupo_liberado -> [materias.eventos] --+
+
+   Lista de espera (servicio `espera`):
+   frontend -> POST /espera -> espera --gRPC--> alumnos / materias / inscripciones (valida)
+                               espera -- espera.registrada --> [espera.eventos] --> notificaciones, auditoria
+   materia.cupo_liberado (de [materias.eventos]) -> espera --gRPC Inscribir--> inscripciones
+                               espera -- espera.promovida --> [espera.eventos] --> aviso al alumno
 ```
 
 | Puerto | Que es |
@@ -52,12 +60,15 @@ grpcurl   -> load_balancer :9000  (gRPC/HTTP2) --+--> upstreams armados con el c
 | 9000 | Gateway nginx, gRPC (HTTP/2) |
 | 8500 | Consul (API y UI) |
 | 8090 | Kafka UI (ver topicos, mensajes y grupos de consumidores) |
+| 3001 | Grafana (dashboard de metricas, se ve sin iniciar sesion; admin/admin para editar) |
+| 9091 | Prometheus (consultas y lista de targets) |
+| 8081 | Swagger UI (documentacion interactiva de la API REST) |
 | 9092 | Kafka (solo dentro de la red de Docker, `kafka:9092`) |
 | 8080 / 9090 | REST / gRPC de cada replica (solo dentro de la red de Docker) |
 
 ## Como esta armado
 
-- `frontend/` la pagina que ves. Esta en el puerto 3000 y le pide todo al gateway nginx (`http://localhost:8000`).
+- `frontend/` la pagina que ves (HTML + CSS + JS, sin frameworks). Esta en el puerto 3000 y le pide todo al gateway nginx (`http://localhost:8000`). Tiene tres apartados: **Mi horario** (calendario semanal y resumen), **Agregar materias** (busqueda, filtros y cupos) y **Lista de espera**. Revisa los avisos del alumno cada 6 segundos.
 - `load_balancer/` el gateway nginx (contenedor propio). Es el unico punto de entrada, para REST (:8000) y para gRPC (:9000). Reparte con round robin entre las replicas **healthy** que Consul tiene en el catalogo. Ver "Gateway nginx".
 - `servicios/proto/` los contratos protobuf (`materias.proto`, `alumnos.proto`, `inscripciones.proto`) y `generar.ps1` para regenerar el codigo.
 - `servicios/pb/` el codigo Go generado a partir de los `.proto` (modulo `horarios/pb`). Lo usan los tres servicios.
@@ -67,18 +78,24 @@ grpcurl   -> load_balancer :9000  (gRPC/HTTP2) --+--> upstreams armados con el c
 - `servicios/materias` las materias. Solo te ensena las de tu carrera (y el tronco comun). Expone `MateriasService`. **Consume** `inscripciones.eventos` (paquete `cupos/`) y **publica** `materia.cupo_agotado` / `materia.cupo_liberado`.
 - `servicios/inscripciones` dar de alta y de baja. Expone `InscripcionesService` y **le pregunta por gRPC a alumnos y a materias** antes de dar de alta. **Publica** `inscripcion.creada` / `inscripcion.cancelada`.
 - `servicios/notificaciones` servicio nuevo, **solo consume**: lee los tres topicos y arma las notificaciones (correo/mensaje simulado en el log). Se consulta con `GET /notificaciones`.
+- `servicios/espera` **lista de espera** (tabla `lista_espera`, que crea solo). `POST /espera` anota al alumno en una materia llena (validando por gRPC que exista, sea de su carrera y de verdad este llena), `GET /espera?alumno_id=` muestra su lugar y `DELETE /espera/{id}` lo saca. **Consume** `materia.cupo_liberado` y **publica** `espera.registrada` / `espera.promovida` / `espera.descartada` / `espera.cancelada` en `espera.eventos`.
+- `servicios/auditoria` **bitacora permanente**: lee los tres topicos y guarda cada evento en Postgres (tabla `auditoria_eventos`, que crea solo). 2 replicas en el mismo grupo de Kafka. Se consulta con `GET /auditoria` y `GET /auditoria/resumen`.
+- `observabilidad/` configuracion de **Prometheus** (descubre las replicas en Consul) y de **Grafana** (datasource y dashboard ya provisionados). Todos los servicios exponen `GET /metrics` (lo agrega la libreria `discovery`, sin tocar el codigo de cada servicio).
+- `docs/` `openapi.yaml` (la API REST, la sirve Swagger UI en :8081) y `EXPLICACION_COMPLETA.md` (el proyecto explicado a detalle, para exponerlo).
 - `database/schema.sql` la base: tablas y los datos de prueba (alumnos, materias, horarios).
 - `mlb/` el middleware en Go de una entrega anterior. No se usa en el compose; queda como referencia.
 - `probar.ps1` el script de pruebas automaticas.
 
-Cada servicio de negocio (`alumnos`, `materias`, `inscripciones`) corre 3 veces. En total son 9 backends + `notificaciones` (1 replica) + Kafka (+ un contenedor efimero que crea los topicos) + Kafka UI + Consul + el gateway nginx + Postgres + el frontend.
+Cada servicio de negocio (`alumnos`, `materias`, `inscripciones`) corre 3 veces. En total son 9 backends + `auditoria` (2 replicas) + `notificaciones` (1 replica) + `espera` (1 replica) + Kafka (+ un contenedor efimero que crea los topicos) + Kafka UI + Consul + Prometheus + Grafana + el exporter de nginx + Swagger UI + el gateway nginx + Postgres + el frontend (24 contenedores).
+
+Si quieres entender todo a fondo (que es cada pieza, como se conectan y como explicarlas), lee [`docs/EXPLICACION_COMPLETA.md`](docs/EXPLICACION_COMPLETA.md).
 
 ## Que necesitas
 
 - Windows 10/11 (yo lo probe aqui). Mac y Linux tambien sirven, el compose es el mismo.
 - Docker Desktop con el motor prendido. Compose ya viene incluido.
-- Puertos libres: **3000**, **8000**, **9000**, **8500** y **8090**.
-- RAM para Docker: con todo arriba, los contenedores usan cerca de 1 GB (medido con `docker stats`); deja al menos 2 GB libres.
+- Puertos libres: **3000**, **3001**, **8000**, **8081**, **8090**, **8500**, **9000** y **9091**.
+- RAM para Docker: con todo arriba (incluidos Prometheus y Grafana) los contenedores usan entre 1.5 y 2 GB; deja al menos 3 GB libres.
 - Solo para probar gRPC desde tu maquina: [`grpcurl`](https://github.com/fullstorydev/grpcurl). Ver "Probar gRPC con grpcurl".
 
 No hace falta instalar Go ni Node ni Postgres para correr el sistema. Docker baja las imagenes y construye todo.
@@ -103,9 +120,13 @@ La primera vez tarda (baja Go, Postgres, nginx, Consul y compila). No cierres la
 
 - Pagina: http://localhost:3000
 - Gateway: http://localhost:8000/heartbeat  (tiene que decir `gateway alive`)
-- Consul UI: http://localhost:8500  (tienen que salir `materias`, `alumnos`, `inscripciones` y sus `*-grpc`, cada uno con 3 instancias, y `notificaciones` con 1)
-- Kafka UI: http://localhost:8090  (cluster `horarios` online, con los topicos `alumnos.eventos`, `materias.eventos` e `inscripciones.eventos`)
+- Consul UI: http://localhost:8500  (tienen que salir `materias`, `alumnos`, `inscripciones` y sus `*-grpc`, cada uno con 3 instancias, y `notificaciones`, `espera` con 1 cada uno, `auditoria` con 2)
+- Kafka UI: http://localhost:8090  (cluster `horarios` online, con los topicos `alumnos.eventos`, `materias.eventos`, `inscripciones.eventos` y `espera.eventos`)
 - Notificaciones: http://localhost:8000/notificaciones  (lista vacia `[]` hasta que pase algo)
+- Grafana: http://localhost:3001  (dashboard "Horarios UP - Sistema distribuido", se actualiza cada 5 s)
+- Prometheus: http://localhost:9091/targets  (14 targets en `UP`: 13 servicios + el gateway)
+- Swagger UI: http://localhost:8081  (toda la API REST, con "Try it out")
+- Auditoria: http://localhost:8000/auditoria/resumen  (total de eventos guardados en Postgres)
 
 Si el heartbeat no responde, espera 10-20 segundos. Postgres y Kafka arrancan primero, luego se crean los topicos, luego los servicios y al final el gateway nginx.
 
@@ -181,6 +202,7 @@ Los errores usan codigos gRPC (los mismos casos que ya devolvia el REST):
 | Login incorrecto | 401 | `UNAUTHENTICATED` |
 | Materia de otra carrera | 403 | `PERMISSION_DENIED` |
 | Ya inscrito | 409 | `ALREADY_EXISTS` |
+| Horario empalmado con otra materia | 409 | `ABORTED` |
 | Sin cupo o materia ya cursada | 409 | `FAILED_PRECONDITION` |
 | No se pudo consultar a otro servicio | 503 | `UNAVAILABLE` |
 
@@ -674,7 +696,7 @@ Primero el sistema tiene que estar arriba (`docker compose up --build`). En otra
 .\probar.ps1
 ```
 
-Ese script corre los casos de negocio, el gateway nginx, Consul, gRPC y Kafka. Si algo falla, el mensaje dice cual. Las pruebas gRPC usan `grpcurl` (lo busca en el `PATH` y en `%USERPROFILE%\go\bin`); si no lo encuentra las salta y avisa. Las de Kafka usan `docker exec kafka ...`. Dura cerca de 1.5 minutos. Ultima corrida: **38 pasaron, 0 fallaron**.
+Ese script corre los casos de negocio, el gateway nginx, Consul, gRPC y Kafka. Si algo falla, el mensaje dice cual. Las pruebas gRPC usan `grpcurl` (lo busca en el `PATH` y en `%USERPROFILE%\go\bin`); si no lo encuentra las salta y avisa. Las de Kafka usan `docker exec kafka ...`. Dura cerca de 1.5 minutos. Ultima corrida: **59 pasaron, 0 fallaron**.
 
 Ojo: el script **apaga y vuelve a prender** una replica de `materias` y el contenedor `kafka` (al final, para probar la recuperacion). Si lo corres justo despues de reiniciar Kafka a mano, dale 30-60 segundos a los consumidores para volver a unirse al grupo o algun caso de eventos puede fallar por tiempo.
 
@@ -702,7 +724,13 @@ Que contiene:
 20. Kafka: una baja de `TLL-001` produce `inscripcion.cancelada` y `materia.cupo_liberado`; el alta siguiente produce `inscripcion.creada` y `materia.cupo_agotado` (cadena entre `inscripciones`, `materias` y `notificaciones`).
 21. Kafka: los grupos `materias-cupos` y `notificaciones` estan activos con lag 0.
 22. Kafka caido (`docker stop kafka`): el alta de un alumno sigue respondiendo 201 en milisegundos.
-23. Kafka vuelve: productores y consumidores se reconectan solos y un `alumno.creado` nuevo llega a `notificaciones`.
+23. Kafka vuelve: productores y consumidores se reconectan solos y un `alumno.creado` nuevo llega a `notificaciones` y a `auditoria`.
+24. Auditoria: 2 replicas healthy en Consul, `alumno.creado` queda guardado en Postgres, el resumen cuenta eventos y no hay ids duplicados (consumidor idempotente). El grupo `auditoria` tiene lag 0.
+25. Observabilidad: Prometheus descubre las 12 replicas por Consul y tiene metricas; Grafana tiene el dashboard provisionado; Swagger UI sirve el `openapi.yaml`.
+26. Gateway: `X-Request-Id` distinto en cada peticion, cabeceras de seguridad, `/metrics` no se expone (404) y una rafaga de 400 peticiones paralelas recibe `429` y despues el gateway se recupera.
+27. Empalme de horarios: un alumno nuevo se inscribe a una materia, la segunda con el mismo horario recibe `409` (el mensaje dice con cual choca; por gRPC es `Aborted`) y una de otro dia si entra.
+28. Lista de espera: `espera` esta healthy en Consul; el alumno entra a la fila de `TLL-001` en el lugar 1, no puede anotarse dos veces ni en una materia que aun tiene lugares, y `GET /notificaciones?destinatario=` devuelve solo sus avisos.
+29. Promocion automatica: alguien se da de baja de `TLL-001` y el primero de la fila queda inscrito solo (Kafka + gRPC) y recibe `espera.promovida`. Al terminar, el script deja todo como estaba.
 
 Esto lo hace el script porque a mano es facil equivocarse con el id de `TLL-001` o dejar la replica apagada.
 

@@ -58,6 +58,8 @@ func (s *Server) Inscribir(ctx context.Context, req *pb.InscribirRequest) (*pb.I
 		return nil, status.Error(codes.PermissionDenied, err.Error())
 	case errors.Is(err, models.ErrYaInscrito):
 		return nil, status.Error(codes.AlreadyExists, err.Error())
+	case errors.Is(err, models.ErrEmpalme):
+		return nil, status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, models.ErrSinCupo), errors.Is(err, models.ErrYaCursada):
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, models.ErrServicioNoDisponible):

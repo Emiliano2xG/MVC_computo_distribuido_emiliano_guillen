@@ -275,6 +275,92 @@ if ($dep) {
 $backends = docker ps --format "{{.Names}}" | Where-Object { $_ -match "servicio_(materias|alumnos|inscripciones)_" }
 if ($backends.Count -eq 9) { Pass "9 contenedores backend encendidos" } else { Fail ("backends encendidos: " + $backends.Count) }
 
+# ---- Kafka (colas de mensajeria asincronas) ----
+function Notifs { @(Invoke-RestMethod "$api/notificaciones?limit=200") }
+function EsperarEvento($tipo, $patron, $previos, $seg = 20) {
+    for ($i = 0; $i -lt ($seg * 2); $i++) {
+        $n = Notifs | Where-Object { $_.tipo -eq $tipo -and $_.mensaje -match $patron -and ($previos -notcontains $_.evento_id) }
+        if ($n) { return ($n | Select-Object -First 1) }
+        Start-Sleep -Milliseconds 500
+    }
+    return $null
+}
+function Post($uri, $obj) {
+    try {
+        $r = Invoke-WebRequest $uri -Method POST -ContentType "application/json" -Body ($obj | ConvertTo-Json -Compress) -UseBasicParsing
+        return [int]$r.StatusCode
+    } catch { return [int]$_.Exception.Response.StatusCode.value__ }
+}
+
+try {
+    $nn = ConsulPassing "notificaciones"
+    if ($nn -eq 1) { Pass "Consul registry: notificaciones (consumidor Kafka) healthy" } else { Fail "Consul notificaciones=$nn" }
+} catch { Fail "Consul notificaciones" }
+
+$topicos = docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list 2>$null
+if (($topicos -contains "alumnos.eventos") -and ($topicos -contains "materias.eventos") -and ($topicos -contains "inscripciones.eventos")) {
+    Pass "Kafka: existen los topicos alumnos.eventos, materias.eventos e inscripciones.eventos"
+} else { Fail "Kafka topicos: $($topicos -join ',')" }
+
+$desc = docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic inscripciones.eventos 2>$null | Out-String
+if ($desc -match "PartitionCount: 3") { Pass "Kafka: inscripciones.eventos con 3 particiones" } else { Fail "Kafka particiones: $desc" }
+
+try {
+    $previos = @(Notifs | ForEach-Object { $_.evento_id })
+    $ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $correoK = "kafka$ts@up.edu.mx"
+    $c = Post "$api/alumnos" @{nombre="Alumno Kafka $ts"; matricula="K$ts"; correo=$correoK; password="kafka123"; carrera_id=1}
+    if ($c -ne 201) { Fail "alta de alumno para Kafka status=$c" }
+    else {
+        $ev = EsperarEvento "alumno.creado" ([regex]::Escape("K$ts")) $previos
+        if ($ev -and ($ev.destinatario -eq $correoK) -and ($ev.topico -eq "alumnos.eventos")) {
+            Pass "Kafka: POST /alumnos publica alumno.creado y notificaciones lo consume (origen $($ev.origen))"
+        } else { Fail "no llego alumno.creado a notificaciones" }
+    }
+} catch { Fail "flujo alumno.creado: $($_.Exception.Message)" }
+
+if ($tll) {
+    try {
+        Start-Sleep -Seconds 3
+        $dueno = $null
+        foreach ($a in 1..6) {
+            $h = Invoke-RestMethod "$api/inscripciones?alumno_id=$a"
+            $x = @($h) | Where-Object { $_.materia_id -eq $tll.id } | Select-Object -First 1
+            if ($x) { $dueno = @{ alumno = $a; id = $x.id } }
+        }
+        if (-not $dueno) { Fail "nadie inscrito en TLL-001 para probar la cadena de eventos" }
+        else {
+            $previos = @(Notifs | ForEach-Object { $_.evento_id })
+            Invoke-WebRequest "$api/inscripciones/$($dueno.id)" -Method DELETE -UseBasicParsing | Out-Null
+            $e1 = EsperarEvento "inscripcion.cancelada" "TLL-001" $previos
+            $e2 = EsperarEvento "materia.cupo_liberado" "TLL-001" $previos
+            if ($e1 -and $e2) {
+                Pass "Kafka: la baja publica inscripcion.cancelada y materias reacciona con materia.cupo_liberado"
+            } else { Fail "cadena baja: cancelada=$([bool]$e1) cupo_liberado=$([bool]$e2)" }
+
+            Start-Sleep -Seconds 3
+            $previos = @(Notifs | ForEach-Object { $_.evento_id })
+            $c = Post "$api/inscripciones" @{alumno_id=$dueno.alumno; materia_id=$tll.id}
+            $e3 = EsperarEvento "inscripcion.creada" "TLL-001" $previos
+            $e4 = EsperarEvento "materia.cupo_agotado" "TLL-001" $previos
+            if ($c -eq 201 -and $e3 -and $e4) {
+                Pass "Kafka: el alta publica inscripcion.creada y materias reacciona con materia.cupo_agotado"
+            } else { Fail "cadena alta: status=$c creada=$([bool]$e3) cupo_agotado=$([bool]$e4)" }
+        }
+    } catch { Fail "cadena de eventos de cupo: $($_.Exception.Message)" }
+}
+
+try {
+    $grupos = docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --all-groups 2>$null | Out-String
+    $lagMax = 0
+    foreach ($l in ($grupos -split "`n")) {
+        if ($l -match "^(materias-cupos|notificaciones)\s+\S+\s+\d+\s+(\d+|-)\s+(\d+)\s+(\d+)") { $lagMax = [Math]::Max($lagMax, [int]$Matches[4]) }
+    }
+    if (($grupos -match "materias-cupos") -and ($grupos -match "notificaciones") -and $lagMax -eq 0) {
+        Pass "Kafka: grupos materias-cupos y notificaciones activos con lag 0"
+    } else { Fail "Kafka grupos/lag=$lagMax" }
+} catch { Fail "Kafka consumer groups" }
+
 $cuantas = 21
 $jobs = 1..$cuantas | ForEach-Object {
     Start-Job -ScriptBlock {
@@ -320,6 +406,34 @@ try {
     }
 } catch { Fail "replica caida tumbo el GET" }
 docker start $replica | Out-Null
+}
+
+# ---- Resiliencia: Kafka caido (la API no debe depender de la cola) ----
+docker stop kafka | Out-Null
+try {
+    $ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $t0 = Get-Date
+    $c = Post "$api/alumnos" @{nombre="Alumno Sin Kafka $ts"; matricula="S$ts"; correo="sinkafka$ts@up.edu.mx"; password="kafka123"; carrera_id=1}
+    $ms = [int]((Get-Date) - $t0).TotalMilliseconds
+    if ($c -eq 201 -and $ms -lt 5000) { Pass "Kafka caido: el alta de alumno sigue respondiendo 201 en $ms ms (publicacion asincrona)" } else { Fail "Kafka caido: status=$c tiempo=${ms}ms" }
+} catch { Fail "alta con Kafka caido" }
+
+docker start kafka | Out-Null
+$sano = $false
+for ($i = 0; $i -lt 60; $i++) {
+    if ((docker inspect -f "{{.State.Health.Status}}" kafka 2>$null) -eq "healthy") { $sano = $true; break }
+    Start-Sleep -Seconds 2
+}
+if (-not $sano) { Fail "Kafka no volvio a quedar healthy" }
+else {
+    Start-Sleep -Seconds 12   # los consumidores reintentan cada 2s y se vuelven a unir al grupo
+    try {
+        $previos = @(Notifs | ForEach-Object { $_.evento_id })
+        $ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $c = Post "$api/alumnos" @{nombre="Alumno Recuperado $ts"; matricula="R$ts"; correo="recuperado$ts@up.edu.mx"; password="kafka123"; carrera_id=1}
+        $ev = EsperarEvento "alumno.creado" ([regex]::Escape("R$ts")) $previos 40
+        if ($c -eq 201 -and $ev) { Pass "Kafka recuperado: productores y consumidores se reconectaron solos" } else { Fail "Kafka recuperado: status=$c evento=$([bool]$ev)" }
+    } catch { Fail "recuperacion de Kafka: $($_.Exception.Message)" }
 }
 
 Write-Host ""

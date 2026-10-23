@@ -56,6 +56,22 @@ func (m *InscripcionModel) GetByAlumnoID(alumnoID int) ([]Inscripcion, error) {
 	return list, nil
 }
 
+// GetByID devuelve una inscripcion con el nombre y la clave de su materia.
+// sql.ErrNoRows si no existe.
+func (m *InscripcionModel) GetByID(id int) (*Inscripcion, error) {
+	item := &Inscripcion{}
+	err := m.DB.QueryRow(`
+		SELECT i.id, i.alumno_id, i.materia_id, i.estado, ma.nombre, ma.clave
+		FROM inscripciones i
+		JOIN materias ma ON ma.id = i.materia_id
+		WHERE i.id = $1`, id,
+	).Scan(&item.ID, &item.AlumnoID, &item.MateriaID, &item.Estado, &item.Materia, &item.Clave)
+	if err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
 func esLlaveDuplicada(err error) bool {
 	var pqErr *pq.Error
 	return errors.As(err, &pqErr) && pqErr.Code == "23505"

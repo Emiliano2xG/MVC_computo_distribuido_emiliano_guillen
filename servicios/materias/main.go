@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -9,10 +10,12 @@ import (
 	"time"
 
 	"materias/controllers"
+	"materias/cupos"
 	"materias/grpcserver"
 	"materias/models"
 
 	"horarios/discovery"
+	"horarios/mensajeria"
 	pb "horarios/pb/materias"
 
 	"google.golang.org/grpc"
@@ -76,7 +79,14 @@ func main() {
 	mux.HandleFunc("/heartbeat", withInstanceHeader(heartbeatHandler))
 	mux.HandleFunc("/health", withInstanceHeader(discovery.HealthHandler(db.Ping)))
 
-	log.Printf("backend %s: REST :8080 + gRPC :9090", instanceID)
+	// Kafka: consume inscripciones.eventos y publica en materias.eventos.
+	productor := mensajeria.NuevoProductor()
+	defer productor.Cerrar()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go cupos.New(materiaModel, productor).Iniciar(ctx)
+
+	log.Printf("backend %s: REST :8080 + gRPC :9090 + Kafka", instanceID)
 	err = discovery.Run(discovery.Config{
 		Name:    "materias",
 		Handler: mux,

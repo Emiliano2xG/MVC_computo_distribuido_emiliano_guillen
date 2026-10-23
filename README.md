@@ -1,10 +1,10 @@
 ﻿# Horarios UP
 Emiliano Guillén — 0250947
-Cómputo Distribuido, entrega acumulada (monolito -> microservicios -> gateway nginx -> Consul -> gRPC)
+Cómputo Distribuido, entrega acumulada (monolito -> microservicios -> gateway nginx -> Consul -> gRPC -> Kafka)
 
 Pagina para armar horario de la universidad. Entras con tu correo de la UP, ves las materias de tu carrera, das de alta y de baja. Algunas ya vienen cursadas y otras inscritas en el horario.
 
-Todo el trafico del navegador pasa por un reverse proxy / gateway **nginx** (que tambien es el load balancer), en su propio contenedor. Atras hay 3 servicios, cada uno con 3 replicas. Los backends se registran en **Consul** (contenedor propio) y nginx arma sus upstreams desde ese catalogo. Ademas, cada backend habla **gRPC con protobuf**: los servicios se hablan entre si por gRPC y el gateway tambien balancea gRPC.
+Todo el trafico del navegador pasa por un reverse proxy / gateway **nginx** (que tambien es el load balancer), en su propio contenedor. Atras hay 3 servicios, cada uno con 3 replicas. Los backends se registran en **Consul** (contenedor propio) y nginx arma sus upstreams desde ese catalogo. Ademas, cada backend habla **gRPC con protobuf**: los servicios se hablan entre si por gRPC y el gateway tambien balancea gRPC. Por ultimo, los servicios publican eventos de negocio en una cola de mensajeria asincrona con **Apache Kafka**, con un topico por servicio, y otros servicios reaccionan a ellos.
 
 ## Evolucion del proyecto (se acumula hacia la entrega final)
 
@@ -14,9 +14,10 @@ Todo el trafico del navegador pasa por un reverse proxy / gateway **nginx** (que
 | 2. Load balancer | Middleware en Go (`mlb/`) con round robin y heartbeat activo. | `mlb/` (ya no se usa, queda de referencia) |
 | 3. Gateway nginx | nginx reemplaza al MLB: reverse proxy + load balancer en su propio contenedor, CORS, `/heartbeat`, `/status`, health check pasivo. | `load_balancer/` |
 | 4. Consul | Service discovery dinamico: registro y baja en el service registry, health check HTTP, Consul en su propio contenedor, nginx con upstreams dinamicos (consul-template). | `servicios/discovery`, `load_balancer/nginx.conf.ctmpl` |
-| 5. gRPC + protobuf (esta entrega) | Contratos `.proto`, servidor gRPC en cada backend (puerto 9090), comunicacion entre servicios por gRPC (`inscripciones` -> `alumnos` / `materias`), gateway gRPC en nginx (:9000) y pruebas con `grpcurl`. | `servicios/proto`, `servicios/pb`, `servicios/*/grpcserver`, `servicios/inscripciones/{clients,service}` |
+| 5. gRPC + protobuf | Contratos `.proto`, servidor gRPC en cada backend (puerto 9090), comunicacion entre servicios por gRPC (`inscripciones` -> `alumnos` / `materias`), gateway gRPC en nginx (:9000) y pruebas con `grpcurl`. | `servicios/proto`, `servicios/pb`, `servicios/*/grpcserver`, `servicios/inscripciones/{clients,service}` |
+| 6. Kafka (esta entrega) | Cola de mensajeria asincrona con Apache Kafka (KRaft, contenedor propio). Un topico por servicio (`alumnos.eventos`, `materias.eventos`, `inscripciones.eventos`), productores en los backends, consumidores con grupo (`materias-cupos`, `notificaciones`), servicio nuevo `notificaciones` y Kafka UI. | `servicios/mensajeria`, `servicios/materias/cupos`, `servicios/notificaciones`, `docker-compose.yml` |
 
-El REST sigue igual para el frontend (los navegadores no hablan gRPC). gRPC es la capa de comunicacion entre servicios y la interfaz para otros clientes.
+El REST sigue igual para el frontend (los navegadores no hablan gRPC). gRPC es la comunicacion **sincrona** entre servicios (pregunto y espero respuesta) y Kafka la **asincrona** (aviso que paso algo y sigo, quien le interese lo procesa despues).
 
 ## Arquitectura
 
@@ -30,9 +31,18 @@ grpcurl   -> load_balancer :9000  (gRPC/HTTP2) --+--> upstreams armados con el c
    materias x3 / alumnos x3 / inscripciones x3     (cada replica: REST :8080 + gRPC :9090)
                   |                    ^
                   v                    |
-              Postgres      inscripciones -> load_balancer :9000 -> alumnos / materias   (gRPC)
+              Postgres      inscripciones -> load_balancer :9000 -> alumnos / materias   (gRPC, sincrono)
 
    cada replica --registra / da de baja (HTTP + gRPC) con health check--> Consul :8500
+
+   Mensajeria asincrona (Kafka, kafka:9092 dentro de la red):
+
+   alumnos x3 ---------- alumno.creado ---------> [alumnos.eventos]       --+
+   inscripciones x3 ---- inscripcion.creada ----> [inscripciones.eventos] --+--> notificaciones (grupo "notificaciones")
+                         inscripcion.cancelada -> [inscripciones.eventos]    |      GET /notificaciones (por el gateway :8000)
+                              |                                              |
+                              v (grupo "materias-cupos")                     |
+                         materias x3 -- materia.cupo_agotado / cupo_liberado -> [materias.eventos] --+
 ```
 
 | Puerto | Que es |
@@ -41,6 +51,8 @@ grpcurl   -> load_balancer :9000  (gRPC/HTTP2) --+--> upstreams armados con el c
 | 8000 | Gateway nginx, REST/JSON |
 | 9000 | Gateway nginx, gRPC (HTTP/2) |
 | 8500 | Consul (API y UI) |
+| 8090 | Kafka UI (ver topicos, mensajes y grupos de consumidores) |
+| 9092 | Kafka (solo dentro de la red de Docker, `kafka:9092`) |
 | 8080 / 9090 | REST / gRPC de cada replica (solo dentro de la red de Docker) |
 
 ## Como esta armado
@@ -50,32 +62,35 @@ grpcurl   -> load_balancer :9000  (gRPC/HTTP2) --+--> upstreams armados con el c
 - `servicios/proto/` los contratos protobuf (`materias.proto`, `alumnos.proto`, `inscripciones.proto`) y `generar.ps1` para regenerar el codigo.
 - `servicios/pb/` el codigo Go generado a partir de los `.proto` (modulo `horarios/pb`). Lo usan los tres servicios.
 - `servicios/discovery/` libreria compartida en Go: levanta REST + gRPC, registra y da de baja en Consul (HTTP y gRPC), health check, interceptor gRPC.
-- `servicios/alumnos` login, crear alumno y la lista de carreras. Expone `AlumnosService`.
-- `servicios/materias` las materias. Solo te ensena las de tu carrera (y el tronco comun). Expone `MateriasService`.
-- `servicios/inscripciones` dar de alta y de baja. Expone `InscripcionesService` y **le pregunta por gRPC a alumnos y a materias** antes de dar de alta.
+- `servicios/mensajeria/` libreria compartida en Go para Kafka: el sobre de los eventos, los nombres de los topicos, el productor asincrono y el consumidor con grupo. Modulo `horarios/mensajeria`.
+- `servicios/alumnos` login, crear alumno y la lista de carreras. Expone `AlumnosService`. **Publica `alumno.creado`** en Kafka.
+- `servicios/materias` las materias. Solo te ensena las de tu carrera (y el tronco comun). Expone `MateriasService`. **Consume** `inscripciones.eventos` (paquete `cupos/`) y **publica** `materia.cupo_agotado` / `materia.cupo_liberado`.
+- `servicios/inscripciones` dar de alta y de baja. Expone `InscripcionesService` y **le pregunta por gRPC a alumnos y a materias** antes de dar de alta. **Publica** `inscripcion.creada` / `inscripcion.cancelada`.
+- `servicios/notificaciones` servicio nuevo, **solo consume**: lee los tres topicos y arma las notificaciones (correo/mensaje simulado en el log). Se consulta con `GET /notificaciones`.
 - `database/schema.sql` la base: tablas y los datos de prueba (alumnos, materias, horarios).
 - `mlb/` el middleware en Go de una entrega anterior. No se usa en el compose; queda como referencia.
 - `probar.ps1` el script de pruebas automaticas.
 
-Cada servicio Go corre 3 veces. En total son 9 backends + Consul + el gateway nginx + Postgres + el frontend.
+Cada servicio de negocio (`alumnos`, `materias`, `inscripciones`) corre 3 veces. En total son 9 backends + `notificaciones` (1 replica) + Kafka (+ un contenedor efimero que crea los topicos) + Kafka UI + Consul + el gateway nginx + Postgres + el frontend.
 
 ## Que necesitas
 
 - Windows 10/11 (yo lo probe aqui). Mac y Linux tambien sirven, el compose es el mismo.
 - Docker Desktop con el motor prendido. Compose ya viene incluido.
-- Puertos libres: **3000**, **8000**, **9000** y **8500**.
+- Puertos libres: **3000**, **8000**, **9000**, **8500** y **8090**.
+- RAM para Docker: con todo arriba, los contenedores usan cerca de 1 GB (medido con `docker stats`); deja al menos 2 GB libres.
 - Solo para probar gRPC desde tu maquina: [`grpcurl`](https://github.com/fullstorydev/grpcurl). Ver "Probar gRPC con grpcurl".
 
 No hace falta instalar Go ni Node ni Postgres para correr el sistema. Docker baja las imagenes y construye todo.
 
 ## Como se instala y se corre
 
-Con `docker-compose.yml` basta. Ahi estan Consul, Postgres, las 9 replicas, el gateway nginx y el frontend. No hay que levantar nada a mano ni correr otro script.
+Con `docker-compose.yml` basta. Ahi estan Consul, Postgres, Kafka (y la creacion de sus topicos), Kafka UI, las 9 replicas, `notificaciones`, el gateway nginx y el frontend. No hay que levantar nada a mano ni correr otro script.
 
 1. Instala Docker Desktop y abrelo. Espera a que el motor este listo. Si lo dejas cerrado, el comando de abajo falla.
 2. Descarga o clona el repo.
 3. Abre una terminal dentro de la carpeta del proyecto, la misma donde esta `docker-compose.yml` (si corres el comando en otra ruta, Docker no encuentra el archivo).
-4. Mira que 3000, 8000, 9000 y 8500 esten libres. Si ya tienes otra app ahi, cierrala.
+4. Mira que 3000, 8000, 9000, 8500 y 8090 esten libres. Si ya tienes otra app ahi, cierrala.
 5. Corre esto, tal cual:
 
 ```
@@ -88,11 +103,13 @@ La primera vez tarda (baja Go, Postgres, nginx, Consul y compila). No cierres la
 
 - Pagina: http://localhost:3000
 - Gateway: http://localhost:8000/heartbeat  (tiene que decir `gateway alive`)
-- Consul UI: http://localhost:8500  (tienen que salir `materias`, `alumnos`, `inscripciones` y sus `*-grpc`, cada uno con 3 instancias)
+- Consul UI: http://localhost:8500  (tienen que salir `materias`, `alumnos`, `inscripciones` y sus `*-grpc`, cada uno con 3 instancias, y `notificaciones` con 1)
+- Kafka UI: http://localhost:8090  (cluster `horarios` online, con los topicos `alumnos.eventos`, `materias.eventos` e `inscripciones.eventos`)
+- Notificaciones: http://localhost:8000/notificaciones  (lista vacia `[]` hasta que pase algo)
 
-Si el heartbeat no responde, espera 10-20 segundos. Postgres arranca primero, luego los servicios, luego el gateway nginx.
+Si el heartbeat no responde, espera 10-20 segundos. Postgres y Kafka arrancan primero, luego se crean los topicos, luego los servicios y al final el gateway nginx.
 
-Para ver que esten los 9 backends + Consul + el gateway + la pagina + la base:
+Para ver que esten todos los contenedores (el unico que sale `Exited (0)` es `kafka_init`, que solo crea los topicos y termina):
 
 ```
 docker compose ps
@@ -473,6 +490,182 @@ REST:  HTTP/1.1 503 Service Unavailable
 | 23 | Health gRPC | `SERVING` | OK |
 | 24 | `materias` caido | `Unavailable` / 503, sin guardar nada | OK |
 
+## Kafka (cola de mensajeria asincrona)
+
+### Para que sirve aqui
+
+gRPC sirve cuando un servicio **necesita la respuesta** de otro para seguir (por ejemplo `inscripciones` necesita saber si la materia es de la carrera del alumno). Kafka sirve para lo contrario: un servicio **avisa que algo ya paso** y sigue con su vida; los que se interesen lo procesan despues, a su ritmo. Si quien escucha esta caido o lento, el servicio que publica no se entera ni se frena.
+
+Un ejemplo concreto: dar de alta una materia ya no sabe nada de notificaciones. `inscripciones` guarda el alta, publica `inscripcion.creada` y responde 201. El servicio `notificaciones` y el monitor de cupos de `materias` reaccionan por su cuenta.
+
+### Broker
+
+- Imagen `apache/kafka:4.0.0` en **modo KRaft** (sin ZooKeeper), un solo nodo, en su propio contenedor (`kafka`, red interna `kafka:9092`). Sin volumen: los mensajes se pierden si haces `docker compose down` (es una practica, no produccion).
+- `KAFKA_AUTO_CREATE_TOPICS_ENABLE=false`: los topicos no aparecen solos por un typo. Los crea el contenedor `kafka_init` (corre una vez y termina) y los backends esperan a que termine (`depends_on: service_completed_successfully`).
+- Healthcheck del broker con `kafka-broker-api-versions.sh`. Kafka UI en http://localhost:8090.
+
+### Topicos (uno por servicio)
+
+Cada servicio es dueno de **su** topico: es el unico que escribe ahi. Los demas solo leen. Todos con 3 particiones (para que las 3 replicas de un consumidor se repartan el trabajo) y factor de replicacion 1 (solo hay un broker).
+
+| Topico | Lo escribe | Eventos | Llave del mensaje | Lo leen (grupo) |
+|---|---|---|---|---|
+| `alumnos.eventos` | `alumnos` | `alumno.creado` | id del alumno | `notificaciones` |
+| `inscripciones.eventos` | `inscripciones` | `inscripcion.creada`, `inscripcion.cancelada` | id de la materia | `materias` (`materias-cupos`), `notificaciones` |
+| `materias.eventos` | `materias` | `materia.cupo_agotado`, `materia.cupo_liberado` | id de la materia | `notificaciones` |
+
+Por que la llave: Kafka garantiza orden **dentro de una particion**, y la llave decide la particion. Con el id de la materia como llave, todas las altas y bajas de una misma materia caen en la misma particion y se procesan en el orden en que ocurrieron (importante para saber si el cupo se lleno o se libero). Ver prueba K5.
+
+### Formato de los eventos
+
+Todos usan el mismo sobre JSON (`servicios/mensajeria/eventos.go`), y ademas llevan el header `tipo`:
+
+```json
+{
+  "id": "5095785123585535",
+  "tipo": "inscripcion.creada",
+  "version": 1,
+  "fecha": "2026-10-23T21:20:26.076004814Z",
+  "origen": "inscripciones-3",
+  "datos": {
+    "inscripcion_id": 122, "alumno_id": 2, "alumno_nombre": "Mariana Lopez",
+    "alumno_correo": "0251001@up.edu.mx", "materia_id": 102,
+    "materia_clave": "TLL-001", "materia_nombre": "Taller de Cupo Lleno"
+  }
+}
+```
+
+`id` es unico por evento (sirve para no procesar dos veces el mismo), `origen` es la replica que lo publico y `version` permite cambiar el formato sin romper a los consumidores viejos. Los eventos llevan el nombre y el correo del alumno y la clave de la materia ya dentro, asi `notificaciones` no necesita llamar a nadie para armar el mensaje.
+
+### Que hace cada servicio
+
+| Servicio | Rol | Que hace |
+|---|---|---|
+| `alumnos` | Productor | Al crear un alumno (`POST /alumnos`, 201) publica `alumno.creado`. |
+| `inscripciones` | Productor | Despues de guardar un alta publica `inscripcion.creada`. En una baja (`DELETE /inscripciones/{id}` o gRPC `DarDeBaja`) publica `inscripcion.cancelada`. Es la misma logica para REST y gRPC. |
+| `materias` | Consumidor **y** productor | Lee `inscripciones.eventos` (grupo `materias-cupos`) y revisa la ocupacion de la materia en su base. Cuando pasa de **no llena a llena** publica `materia.cupo_agotado`; cuando pasa de **llena a con lugar** publica `materia.cupo_liberado`. Si el evento no cambia el estado no publica nada. |
+| `notificaciones` | Consumidor | Lee los tres topicos (grupo `notificaciones`) y por cada evento arma una notificacion: a los alumnos (bienvenida, alta, baja) y a `coordinacion@up.edu.mx` (cupo agotado / liberado). Las guarda en memoria (ultimas 200) y las imprime en el log (`NOTIFICACION [tipo] para ...`). Se consulta con `GET /notificaciones?limit=N`. Se registra en Consul y nginx lo expone en el gateway. |
+
+Este flujo encadena eventos: `inscripcion.creada` -> (materias) -> `materia.cupo_agotado` -> (notificaciones). Ningun servicio llama a otro directamente.
+
+### Garantias y decisiones de diseno
+
+- **Publicar es asincrono.** `Publicar()` regresa de inmediato y manda el mensaje en una goroutine (timeout de 15 s). El REST/gRPC **no espera a Kafka**, asi que si Kafka se cae las altas siguen funcionando (prueba K7). El productor usa `acks=all` (`RequireAll`) y balanceo por hash de la llave.
+- **Consumo al-menos-una-vez.** Los consumidores usan grupo, hacen `FetchMessage` y **solo confirman el offset (`CommitMessages`) despues de procesar**. Si el servicio muere a medias, el mensaje se vuelve a entregar al reiniciarse. Un handler que falla se reintenta 3 veces con espera creciente; si sigue fallando se descarta con un log `DESCARTADO` (no hay cola de errores).
+- **Idempotencia.** Como un mensaje puede llegar dos veces, `notificaciones` ignora los eventos cuyo `id` ya vio. En `materias` el efecto es idempotente por construccion: lee la ocupacion actual de la base y solo publica si cambio el estado.
+- **Grupos de consumidores.** Las 3 replicas de `materias` comparten el grupo `materias-cupos`, asi cada evento lo procesa **una sola replica** y las particiones se reparten (prueba K4). `notificaciones` es un grupo aparte, por eso recibe **todos** los eventos aunque `materias` tambien los lea.
+- **Primer arranque.** Los consumidores empiezan desde el principio del topico (`FirstOffset`) si el grupo es nuevo, asi no se pierde lo publicado antes de que se unieran.
+- **Reconexion.** Si Kafka no esta, productor y consumidores no tumban el servicio: los consumidores reintentan cada 2 s y se vuelven a unir al grupo solos (prueba K8).
+- Si `KAFKA_BROKERS` esta vacio, el productor queda desactivado (no-op); sirve para correr un servicio suelto sin Kafka.
+
+### Limitaciones (conocidas)
+
+- **No hay outbox.** El alta se guarda en Postgres y el evento se publica despues, sin transaccion que cubra las dos cosas. Si Kafka esta caido en ese momento (o el servicio muere justo entre las dos), **el evento se pierde** y solo queda un log de error (prueba K7). La solucion seria una tabla outbox; no se hizo.
+- **Estado de cupo en memoria.** El monitor de `materias` guarda en memoria cuales materias estaban llenas (lo carga de la base al arrancar). Si se reparten de nuevo las particiones, la replica nueva arranca con el estado leido de la base. Ademas, si una baja y un alta pasan casi juntas, el monitor lee la ocupacion actual de la base y puede ver el mismo estado dos veces y no publicar la transicion intermedia.
+- **`notificaciones` tiene 1 replica y guarda en memoria.** Al reiniciarse vuelve a leer su topico desde donde quedo su grupo, pero su lista de las ultimas 200 se vacia. Las notificaciones son simuladas (log), no se manda correo real.
+- **Un solo broker**, factor de replicacion 1 y sin volumen: es de laboratorio. No hay autenticacion ni TLS.
+- Sin DLQ: un mensaje que falla 3 veces se descarta.
+
+### Probar Kafka
+
+Todo con el sistema arriba (`docker compose up --build -d`). Los comandos de Kafka se corren dentro del contenedor `kafka`. Resultados reales de la corrida del 23 de octubre de 2026.
+
+**K1. Los topicos existen** (los creo `kafka_init`):
+
+```
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe
+```
+```
+Topic: alumnos.eventos        PartitionCount: 3  ReplicationFactor: 1
+Topic: materias.eventos       PartitionCount: 3  ReplicationFactor: 1
+Topic: inscripciones.eventos  PartitionCount: 3  ReplicationFactor: 1
+```
+
+**K2. Alta de alumno -> `alumno.creado` -> notificacion.**
+
+```
+POST /alumnos   {"nombre":"Alumno Kafka 1792790424","matricula":"K1792790424","correo":"kafka1792790424@up.edu.mx",...}
+-> 201 {"id":6,...}
+```
+
+Segundos despues, `GET http://localhost:8000/notificaciones`:
+
+```
+alumno.creado | alumnos.eventos | kafka1792790424@up.edu.mx | Bienvenido Alumno Kafka 1792790424: tu cuenta (matricula K1792790424) en Inteligencia de Datos y Ciberseguridad ya esta lista.
+```
+
+**K3. Baja y alta de una materia: cadena de eventos entre servicios.** `TLL-001` es un taller con cupo 1 que ya estaba lleno (alumno 2). Se dio de baja y se volvio a inscribir:
+
+```
+DELETE /inscripciones/120                      -> 204
+POST   /inscripciones {"alumno_id":2,"materia_id":102}   -> 201
+```
+
+`GET /notificaciones` (las mas nuevas primero):
+
+```
+materia.cupo_agotado   | materias.eventos       | coordinacion@up.edu.mx | Cupo agotado en TLL-001 - Taller de Cupo Lleno (1/1).
+inscripcion.creada     | inscripciones.eventos  | 0251001@up.edu.mx      | Te inscribiste a TLL-001 - Taller de Cupo Lleno.
+materia.cupo_liberado  | materias.eventos       | coordinacion@up.edu.mx | Se libero un lugar en TLL-001 - Taller de Cupo Lleno (0/1).
+inscripcion.cancelada  | inscripciones.eventos  | 0251001@up.edu.mx      | Diste de baja TLL-001 - Taller de Cupo Lleno.
+```
+
+Cada evento de `inscripciones` provoco uno de `materias` (`origen: materias-1`) y los dos terminaron en `notificaciones`. Se ve tambien en los logs: `docker compose logs servicio_notificaciones` y `servicio_materias_1`.
+
+El mensaje crudo en el topico (`kafka-console-consumer.sh --topic inscripciones.eventos --from-beginning --property print.key=true --property print.headers=true --property print.partition=true`):
+
+```
+Partition:1  tipo:inscripcion.cancelada  102  {"id":"48732411f01968f0","tipo":"inscripcion.cancelada","version":1,"fecha":"2026-10-23T21:20:10.562122021Z","origen":"inscripciones-1","datos":{"inscripcion_id":120,"alumno_id":2,"alumno_nombre":"Mariana Lopez","alumno_correo":"0251001@up.edu.mx","materia_id":102,"materia_clave":"TLL-001","materia_nombre":"Taller de Cupo Lleno"}}
+Partition:1  tipo:inscripcion.creada    102  {"id":"5095785123585535","tipo":"inscripcion.creada","version":1,"fecha":"2026-10-23T21:20:26.076004814Z","origen":"inscripciones-3",...}
+```
+
+**K4. Grupos de consumidores y lag.**
+
+```
+docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:9092 --describe --all-groups
+```
+```
+GROUP           TOPIC                  PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER
+materias-cupos  inscripciones.eventos  0          -               0               -    main@materias-3
+materias-cupos  inscripciones.eventos  1          2               2               0    main@materias-1
+materias-cupos  inscripciones.eventos  2          -               0               -    main@materias-2
+notificaciones  alumnos.eventos        2          1               1               0    main@notificaciones-1
+notificaciones  inscripciones.eventos  1          2               2               0    main@notificaciones-1
+notificaciones  materias.eventos       1          2               2               0    main@notificaciones-1
+(las demas particiones: vacias)
+```
+
+Las 3 particiones de `inscripciones.eventos` estan repartidas entre `materias-1`, `materias-2` y `materias-3` (una cada una). `notificaciones` lee todas. **LAG 0**: no queda nada pendiente.
+
+**K5. Orden por llave.** Los dos mensajes de `TLL-001` (llave `102`) cayeron en la **misma particion** (`Partition:1`, ver K3), por eso `cancelada` siempre se procesa antes que la `creada` posterior. Y por eso los eventos de esa materia siempre los atiende la misma replica de `materias` (`materias-1`).
+
+**K6. Kafka UI.** http://localhost:8090 -> cluster `horarios` (online, 1 broker, 3 topicos de negocio mas `__consumer_offsets`) -> Topics -> ver mensajes, particiones y los grupos `materias-cupos` y `notificaciones`.
+
+**K7. Kafka caido: la API no se cae.** `docker stop kafka` y se hizo un alta de inscripcion:
+
+```
+POST /inscripciones {"alumno_id":6,"materia_id":101}   -> 201 en 207 ms
+log de inscripciones-2:  kafka: ERROR publicando inscripcion.creada en inscripciones.eventos (key=101): dial tcp: lookup kafka: i/o timeout
+log de notificaciones:   kafka: group=notificaciones error leyendo: failed to dial ... (reintento en 2s)
+```
+
+La respuesta no espero a Kafka. El costo, que conviene tener claro: **ese evento se perdio** (no hay outbox), la notificacion de esa alta nunca existira. Ver "Limitaciones".
+
+**K8. Recuperacion.** `docker start kafka`: el broker vuelve `healthy` con sus topicos (el contenedor conserva su disco mientras no lo borres). Los productores y consumidores se reconectan solos sin reiniciar nada. Se creo otro alumno y su `alumno.creado` llego a `notificaciones` (lo cubre `probar.ps1`).
+
+#### Resumen
+
+| # | Prueba | Resultado |
+|---|---|---|
+| K1 | Topicos creados por `kafka_init` (3 particiones) | OK |
+| K2 | `POST /alumnos` -> `alumno.creado` -> `notificaciones` | OK |
+| K3 | Baja/alta -> `inscripcion.*` -> `materia.cupo_*` -> `notificaciones` | OK |
+| K4 | Grupos `materias-cupos` (repartido entre 3 replicas) y `notificaciones`, lag 0 | OK |
+| K5 | Misma llave = misma particion (orden) | OK |
+| K6 | Kafka UI en :8090 | OK |
+| K7 | Kafka caido: el alta responde 201 en ms, el evento se pierde (documentado) | OK |
+| K8 | Kafka vuelve y todo se reconecta solo | OK |
+
 ## Pruebas automaticas
 
 Primero el sistema tiene que estar arriba (`docker compose up --build`). En otra terminal, desde la misma carpeta:
@@ -481,7 +674,9 @@ Primero el sistema tiene que estar arriba (`docker compose up --build`). En otra
 .\probar.ps1
 ```
 
-Ese script corre los casos de negocio, el gateway nginx, Consul y gRPC. Si algo falla, el mensaje dice cual. Las pruebas gRPC usan `grpcurl` (lo busca en el `PATH` y en `%USERPROFILE%\go\bin`); si no lo encuentra las salta y avisa. Ultima corrida: **29 pasaron, 0 fallaron**.
+Ese script corre los casos de negocio, el gateway nginx, Consul, gRPC y Kafka. Si algo falla, el mensaje dice cual. Las pruebas gRPC usan `grpcurl` (lo busca en el `PATH` y en `%USERPROFILE%\go\bin`); si no lo encuentra las salta y avisa. Las de Kafka usan `docker exec kafka ...`. Dura cerca de 1.5 minutos. Ultima corrida: **38 pasaron, 0 fallaron**.
+
+Ojo: el script **apaga y vuelve a prender** una replica de `materias` y el contenedor `kafka` (al final, para probar la recuperacion). Si lo corres justo despues de reiniciar Kafka a mano, dale 30-60 segundos a los consumidores para volver a unirse al grupo o algun caso de eventos puede fallar por tiempo.
 
 Que contiene:
 
@@ -502,6 +697,12 @@ Que contiene:
 15. Estan los 9 contenedores backend.
 16. Varias peticiones al mismo tiempo: nginx las reparte entre las replicas y todas contestan.
 17. Si se cae una replica, Consul la saca (HTTP y gRPC) y el GET sigue (nginx manda a otra).
+18. Kafka: `notificaciones` esta healthy en Consul; existen los 3 topicos con 3 particiones.
+19. Kafka: `POST /alumnos` publica `alumno.creado` y `notificaciones` lo consume (se espera hasta 20 s consultando `GET /notificaciones`).
+20. Kafka: una baja de `TLL-001` produce `inscripcion.cancelada` y `materia.cupo_liberado`; el alta siguiente produce `inscripcion.creada` y `materia.cupo_agotado` (cadena entre `inscripciones`, `materias` y `notificaciones`).
+21. Kafka: los grupos `materias-cupos` y `notificaciones` estan activos con lag 0.
+22. Kafka caido (`docker stop kafka`): el alta de un alumno sigue respondiendo 201 en milisegundos.
+23. Kafka vuelve: productores y consumidores se reconectan solos y un `alumno.creado` nuevo llega a `notificaciones`.
 
 Esto lo hace el script porque a mano es facil equivocarse con el id de `TLL-001` o dejar la replica apagada.
 
@@ -562,7 +763,12 @@ docker start monolito_tarea_1-servicio_materias_2-1
 
 ## Si algo sale mal
 
-- Puerto 3000, 8000, 9000 u 8500 ocupado: cierra lo que lo este usando (otro compose, otra app).
+- Puerto 3000, 8000, 9000, 8500 u 8090 ocupado: cierra lo que lo este usando (otro compose, otra app).
+- Los servicios no arrancan y `docker compose ps` muestra `kafka_init` fallido o `kafka` sin `healthy`: Kafka tarda 20-40 s la primera vez. Mira `docker compose logs kafka kafka_init`. Los backends esperan a que `kafka_init` termine bien.
+- `GET /notificaciones` devuelve `[]`: aun no ha pasado ningun evento desde que arranco `notificaciones` (la lista esta en memoria). Crea un alumno o da de alta/baja una materia y vuelve a consultar. Si se reinicia el servicio la lista empieza vacia.
+- Hice una alta y no llego la notificacion: mira `docker compose logs servicio_inscripciones_1 servicio_inscripciones_2 servicio_inscripciones_3` por `kafka: ERROR publicando`. Si Kafka estaba caido en ese momento, el evento se perdio (no hay outbox).
+- Despues de `docker compose down` los topicos y sus mensajes ya no existen (Kafka no tiene volumen); `up` los crea otra vez vacios.
+- `docker compose up --build` falla bajando imagenes con `EOF` o `short read`: es Docker Hub, vuelve a correr el comando.
 - Docker instalado pero no responde: abre Docker Desktop y espera. Luego otra vez `docker compose up --build`.
 - Catalogo corto o sin materias cursadas: la base es de un seed viejo. `docker compose down -v` y de nuevo `up --build`.
 - Cambiaste el frontend y no se ve: el contenedor sigue con la imagen anterior. `docker compose up --build frontend` y Ctrl+F5.
@@ -578,7 +784,7 @@ Vive en `load_balancer/` (`Dockerfile`, `entrypoint.sh` y `nginx.conf.ctmpl`), c
 
 Que hace:
 
-- **Reverse proxy / gateway REST (:8000)**: un solo punto de entrada. Rutas por prefijo: `/materias`, `/alumnos`, `/inscripciones`. Cualquier otra ruta responde 404 en JSON. Manda `Host`, `X-Real-IP` y `X-Forwarded-*` a los backends.
+- **Reverse proxy / gateway REST (:8000)**: un solo punto de entrada. Rutas por prefijo: `/materias`, `/alumnos`, `/inscripciones`, `/notificaciones`. Cualquier otra ruta responde 404 en JSON. Manda `Host`, `X-Real-IP` y `X-Forwarded-*` a los backends.
 - **Gateway gRPC (:9000)**: HTTP/2 con `grpc_pass`, enruta por el nombre del servicio gRPC. Ver "Comunicacion entre el load balancer y los servicios".
 - **Load balancer**: un bloque `upstream` por servicio (REST y gRPC), armado desde Consul (solo replicas que pasan el health check), algoritmo round robin (se puede cambiar a `least_conn`), con `zone` compartida entre workers.
 - **Tolerancia a fallas**: Consul hace health check activo cada 5 s. Si una replica se apaga, se da de baja del registry y consul-template recarga nginx. Ademas queda el health check pasivo de nginx (`max_fails=2 fail_timeout=10s`, `proxy_next_upstream` / `grpc_next_upstream`). nginx no reintenta POST/DELETE, asi que un alta no se duplica.
@@ -598,6 +804,7 @@ Que hace cada backend al arrancar y al apagar (`servicios/discovery`):
 
 - **Registro**: `PUT /v1/agent/service/register` con el nombre del servicio, el id de la replica (`materias-1`, etc.) y la direccion Docker. Se registran dos servicios por replica: `<nombre>` (REST) y `<nombre>-grpc` (gRPC).
 - **Health check**: para REST, Consul llama `GET /health` cada 5 s (pega a Postgres). Para gRPC usa el protocolo estandar `grpc.health.v1` contra el puerto 9090. Si la base no responde, la instancia queda `critical` y nginx deja de mandarle trafico. Si se queda critica 30 s, Consul la borra solo (`DeregisterCriticalServiceAfter`).
+- `notificaciones` tambien se registra en Consul, pero solo como `notificaciones` (REST): no tiene servidor gRPC ni base de datos, su health check solo confirma que el proceso responde.
 - **Baja**: con SIGTERM (`docker stop` / `docker compose down`) el proceso se da de baja de los dos servicios con `PUT /v1/agent/service/deregister/:id` y recien entonces cierra REST y gRPC.
 
 El gateway no tiene las replicas escritas a mano. `consul-template` (en el mismo contenedor que nginx) lee el catalogo, escribe los `upstream` y recarga nginx cuando alguien entra o sale.

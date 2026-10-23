@@ -3,7 +3,27 @@
 # Frente: http://localhost:3000
 # Gateway nginx (load balancer) REST: http://localhost:8000   gRPC: localhost:9000
 # Consul UI (service discovery): http://localhost:8500
+# Kafka UI (mensajeria asincrona): http://localhost:8090
 # Parar:  docker compose down
+
+# Entorno y dependencias que comparten los backends con base de datos.
+x-backend-env: &env_backend
+  DB_USER: postgres
+  DB_PASSWORD: postgres
+  DB_NAME: horarios_db
+  DB_HOST: base_de_datos
+  DB_PORT: "5432"
+  CONSUL_HTTP_ADDR: consul:8500
+  GRPC_GATEWAY_ADDR: load_balancer:9000
+  KAFKA_BROKERS: kafka:9092
+
+x-backend-deps: &deps_backend
+  base_de_datos:
+    condition: service_healthy
+  consul:
+    condition: service_healthy
+  kafka_init:
+    condition: service_completed_successfully
 
 services:
   consul:
@@ -19,6 +39,71 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    networks:
+      - horarios-net
+
+  # ---------------------------------------------------------------------------
+  # Apache Kafka (modo KRaft, un solo nodo: sin ZooKeeper). Es la cola de
+  # mensajeria asincrona entre servicios.
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # los topicos los crea kafka_init
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+    networks:
+      - horarios-net
+
+  # Crea un topico por servicio (3 particiones cada uno) y termina.
+  kafka_init:
+    image: apache/kafka:4.0.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for t in alumnos.eventos materias.eventos inscripciones.eventos; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+            --topic $$t --partitions 3 --replication-factor 1
+        done
+        echo "topicos listos:"
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+    networks:
+      - horarios-net
+
+  kafka_ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka_ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: horarios
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "false"
+    ports:
+      - "8090:8080"
+    depends_on:
+      kafka_init:
+        condition: service_completed_successfully
     networks:
       - horarios-net
 
@@ -39,26 +124,17 @@ services:
     networks:
       - horarios-net
 
+  # ---- materias (consume inscripciones.eventos, publica materias.eventos) ----
   servicio_materias_1:
     build:
       context: ./servicios
       dockerfile: materias/Dockerfile
     hostname: materias-1
-    environment: &env_backend
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-      DB_NAME: horarios_db
-      DB_HOST: base_de_datos
-      DB_PORT: "5432"
-      CONSUL_HTTP_ADDR: consul:8500
-      GRPC_GATEWAY_ADDR: load_balancer:9000
+    environment:
+      <<: *env_backend
       INSTANCE_ID: materias-1
       SERVICE_ADDRESS: servicio_materias_1
-    depends_on:
-      base_de_datos:
-        condition: service_healthy
-      consul:
-        condition: service_healthy
+    depends_on: *deps_backend
     networks:
       - horarios-net
 
@@ -71,11 +147,7 @@ services:
       <<: *env_backend
       INSTANCE_ID: materias-2
       SERVICE_ADDRESS: servicio_materias_2
-    depends_on:
-      base_de_datos:
-        condition: service_healthy
-      consul:
-        condition: service_healthy
+    depends_on: *deps_backend
     networks:
       - horarios-net
 
@@ -88,14 +160,11 @@ services:
       <<: *env_backend
       INSTANCE_ID: materias-3
       SERVICE_ADDRESS: servicio_materias_3
-    depends_on:
-      base_de_datos:
-        condition: service_healthy
-      consul:
-        condition: service_healthy
+    depends_on: *deps_backend
     networks:
       - horarios-net
 
+  # ---- alumnos (publica alumnos.eventos) ----
   servicio_alumnos_1:
     build:
       context: ./servicios
@@ -105,11 +174,7 @@ services:
       <<: *env_backend
       INSTANCE_ID: alumnos-1
       SERVICE_ADDRESS: servicio_alumnos_1
-    depends_on:
-      base_de_datos:
-        condition: service_healthy
-      consul:
-        condition: service_healthy
+    depends_on: *deps_backend
     networks:
       - horarios-net
 
@@ -122,11 +187,7 @@ services:
       <<: *env_backend
       INSTANCE_ID: alumnos-2
       SERVICE_ADDRESS: servicio_alumnos_2
-    depends_on:
-      base_de_datos:
-        condition: service_healthy
-      consul:
-        condition: service_healthy
+    depends_on: *deps_backend
     networks:
       - horarios-net
 
@@ -139,14 +200,11 @@ services:
       <<: *env_backend
       INSTANCE_ID: alumnos-3
       SERVICE_ADDRESS: servicio_alumnos_3
-    depends_on:
-      base_de_datos:
-        condition: service_healthy
-      consul:
-        condition: service_healthy
+    depends_on: *deps_backend
     networks:
       - horarios-net
 
+  # ---- inscripciones (publica inscripciones.eventos) ----
   servicio_inscripciones_1:
     build:
       context: ./servicios
@@ -156,11 +214,7 @@ services:
       <<: *env_backend
       INSTANCE_ID: inscripciones-1
       SERVICE_ADDRESS: servicio_inscripciones_1
-    depends_on:
-      base_de_datos:
-        condition: service_healthy
-      consul:
-        condition: service_healthy
+    depends_on: *deps_backend
     networks:
       - horarios-net
 
@@ -173,11 +227,7 @@ services:
       <<: *env_backend
       INSTANCE_ID: inscripciones-2
       SERVICE_ADDRESS: servicio_inscripciones_2
-    depends_on:
-      base_de_datos:
-        condition: service_healthy
-      consul:
-        condition: service_healthy
+    depends_on: *deps_backend
     networks:
       - horarios-net
 
@@ -190,11 +240,27 @@ services:
       <<: *env_backend
       INSTANCE_ID: inscripciones-3
       SERVICE_ADDRESS: servicio_inscripciones_3
+    depends_on: *deps_backend
+    networks:
+      - horarios-net
+
+  # ---- notificaciones (consume los 3 topicos; no usa base de datos) ----
+  # Una sola replica: guarda las notificaciones en memoria.
+  servicio_notificaciones:
+    build:
+      context: ./servicios
+      dockerfile: notificaciones/Dockerfile
+    hostname: notificaciones-1
+    environment:
+      CONSUL_HTTP_ADDR: consul:8500
+      KAFKA_BROKERS: kafka:9092
+      INSTANCE_ID: notificaciones-1
+      SERVICE_ADDRESS: servicio_notificaciones
     depends_on:
-      base_de_datos:
-        condition: service_healthy
       consul:
         condition: service_healthy
+      kafka_init:
+        condition: service_completed_successfully
     networks:
       - horarios-net
 
@@ -233,6 +299,8 @@ services:
       servicio_inscripciones_2:
         condition: service_started
       servicio_inscripciones_3:
+        condition: service_started
+      servicio_notificaciones:
         condition: service_started
     networks:
       - horarios-net

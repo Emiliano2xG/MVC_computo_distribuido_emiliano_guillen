@@ -1,11 +1,13 @@
 // Package service tiene la logica de negocio de inscripciones que cruza
-// servicios: antes de guardar un alta pregunta por gRPC a alumnos y materias.
+// servicios: antes de guardar un alta pregunta por gRPC a alumnos y materias,
+// y despues de guardar (alta o baja) publica un evento en Kafka.
 package service
 
 import (
 	"context"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"google.golang.org/grpc"
@@ -16,23 +18,25 @@ import (
 	"inscripciones/clients"
 	"inscripciones/models"
 
+	"horarios/mensajeria"
 	alumnospb "horarios/pb/alumnos"
 	materiaspb "horarios/pb/materias"
 )
 
 type InscripcionService struct {
-	Model   *models.InscripcionModel
-	Clients *clients.Clients
-	Timeout time.Duration
-	Caller  string
+	Model     *models.InscripcionModel
+	Clients   *clients.Clients
+	Productor *mensajeria.Productor
+	Timeout   time.Duration
+	Caller    string
 }
 
-func New(model *models.InscripcionModel, c *clients.Clients) *InscripcionService {
+func New(model *models.InscripcionModel, c *clients.Clients, p *mensajeria.Productor) *InscripcionService {
 	caller := os.Getenv("INSTANCE_ID")
 	if caller == "" {
 		caller = "inscripciones"
 	}
-	return &InscripcionService{Model: model, Clients: c, Timeout: 3 * time.Second, Caller: caller}
+	return &InscripcionService{Model: model, Clients: c, Productor: p, Timeout: 3 * time.Second, Caller: caller}
 }
 
 // llamada prepara el contexto de una llamada saliente: timeout y el header
@@ -67,6 +71,7 @@ func replica(hdr metadata.MD) string {
 //  2. materias.GetMateria                    -> existe
 //  3. materias.MateriaPerteneceACarrera      -> es de su carrera (si no, 403)
 //  4. guarda en la base (duplicado, cupo)
+//  5. publica inscripcion.creada en Kafka (asincrono, no bloquea la respuesta)
 func (s *InscripcionService) Inscribir(ctx context.Context, alumnoID, materiaID int) (*models.Inscripcion, error) {
 	var hdr metadata.MD
 
@@ -80,7 +85,7 @@ func (s *InscripcionService) Inscribir(ctx context.Context, alumnoID, materiaID 
 	log.Printf("inscripciones -> alumnos.GetAlumno(%d) ok (atendio %s)", alumnoID, replica(hdr))
 
 	c2, cancel := s.llamada(ctx)
-	_, err = s.Clients.Materias.GetMateria(c2, &materiaspb.GetMateriaRequest{Id: int32(materiaID)}, grpc.Header(&hdr))
+	materia, err := s.Clients.Materias.GetMateria(c2, &materiaspb.GetMateriaRequest{Id: int32(materiaID)}, grpc.Header(&hdr))
 	cancel()
 	if err != nil {
 		log.Printf("inscripciones -> materias.GetMateria(%d): %v", materiaID, status.Code(err))
@@ -102,5 +107,50 @@ func (s *InscripcionService) Inscribir(ctx context.Context, alumnoID, materiaID 
 		return nil, models.ErrOtraCarrera
 	}
 
-	return s.Model.Create(alumnoID, materiaID)
+	item, err := s.Model.Create(alumnoID, materiaID)
+	if err != nil {
+		return nil, err
+	}
+
+	s.Productor.Publicar(mensajeria.TopicInscripciones, strconv.Itoa(materiaID), mensajeria.TipoInscripcionCreada,
+		mensajeria.InscripcionEvento{
+			InscripcionID: item.ID,
+			AlumnoID:      alumnoID,
+			AlumnoNombre:  alumno.GetNombre(),
+			AlumnoCorreo:  alumno.GetCorreo(),
+			MateriaID:     materiaID,
+			MateriaClave:  materia.GetClave(),
+			MateriaNombre: materia.GetNombre(),
+		})
+	return item, nil
+}
+
+// DarDeBaja borra una inscripcion y publica inscripcion.cancelada en Kafka.
+// Devuelve sql.ErrNoRows si no existe y models.ErrYaCursada si ya esta cursada.
+func (s *InscripcionService) DarDeBaja(ctx context.Context, id int) error {
+	insc, err := s.Model.GetByID(id)
+	if err != nil {
+		return err
+	}
+	if err := s.Model.Delete(id); err != nil {
+		return err
+	}
+
+	ev := mensajeria.InscripcionEvento{
+		InscripcionID: id,
+		AlumnoID:      insc.AlumnoID,
+		MateriaID:     insc.MateriaID,
+		MateriaClave:  insc.Clave,
+		MateriaNombre: insc.Materia,
+	}
+	// Enriquecer con el alumno es "lo mejor posible": si alumnos no responde,
+	// la baja ya esta hecha y el evento sale solo con los ids.
+	c, cancel := s.llamada(ctx)
+	defer cancel()
+	if al, err := s.Clients.Alumnos.GetAlumno(c, &alumnospb.GetAlumnoRequest{Id: int32(insc.AlumnoID)}); err == nil {
+		ev.AlumnoNombre = al.GetNombre()
+		ev.AlumnoCorreo = al.GetCorreo()
+	}
+	s.Productor.Publicar(mensajeria.TopicInscripciones, strconv.Itoa(insc.MateriaID), mensajeria.TipoInscripcionCancelada, ev)
+	return nil
 }

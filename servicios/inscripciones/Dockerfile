@@ -3,6 +3,7 @@ FROM golang:1.26-alpine AS builder
 WORKDIR /src
 
 COPY discovery ./discovery
+COPY mensajeria ./mensajeria
 COPY pb ./pb
 COPY inscripciones ./inscripciones
 WORKDIR /src/inscripciones

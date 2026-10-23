@@ -8,10 +8,13 @@ import (
 	"strings"
 
 	"alumnos/models"
+
+	"horarios/mensajeria"
 )
 
 type AlumnoController struct {
 	AlumnoModel *models.AlumnoModel
+	Productor   *mensajeria.Productor // publica alumno.creado en Kafka
 }
 
 func (c *AlumnoController) AlumnosHandler(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +51,16 @@ func (c *AlumnoController) AlumnosHandler(w http.ResponseWriter, r *http.Request
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// Evento asincrono: no bloquea ni afecta la respuesta.
+		c.Productor.Publicar(mensajeria.TopicAlumnos, strconv.Itoa(item.ID), mensajeria.TipoAlumnoCreado,
+			mensajeria.AlumnoCreado{
+				AlumnoID:  item.ID,
+				Nombre:    item.Nombre,
+				Matricula: item.Matricula,
+				Correo:    item.Correo,
+				CarreraID: item.CarreraID,
+				Carrera:   item.Carrera,
+			})
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(item)
 

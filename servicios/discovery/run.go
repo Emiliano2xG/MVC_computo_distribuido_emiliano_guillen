@@ -17,13 +17,14 @@ import (
 )
 
 // Config junta todo lo que un backend necesita para vivir en el sistema:
-// REST (HTTP) + gRPC + registro/baja en Consul.
+// REST (HTTP) + gRPC (opcional) + registro/baja en Consul.
 type Config struct {
 	Name    string // nombre del servicio: "materias", "alumnos", "inscripciones"
 	Handler http.Handler
 	Ping    func() error // health: normalmente db.Ping
 
 	// Registra las implementaciones gRPC (pb.RegisterXxxServer(s, impl)).
+	// Si es nil el servicio solo expone REST (por ejemplo notificaciones).
 	RegisterGRPC func(s *grpc.Server)
 }
 
@@ -44,38 +45,43 @@ func unaryInterceptor(instanceID string) grpc.UnaryServerInterceptor {
 	}
 }
 
-// Run levanta HTTP (:SERVICE_PORT, 8080) y gRPC (:GRPC_PORT, 9090), registra
-// ambos en Consul, y al recibir SIGTERM/SIGINT los da de baja antes de cerrar.
+// Run levanta HTTP (:SERVICE_PORT, 8080) y, si hay RegisterGRPC, gRPC
+// (:GRPC_PORT, 9090). Registra todo en Consul y, al recibir SIGTERM/SIGINT,
+// da de baja antes de cerrar.
 //
-// En Consul quedan dos servicios por replica:
+// En Consul quedan por replica:
 //
 //	<name>        (HTTP, check GET /health)
-//	<name>-grpc   (gRPC, check grpc.health.v1)
+//	<name>-grpc   (gRPC, check grpc.health.v1)  solo si hay gRPC
 func Run(cfg Config) error {
 	id := InstanceID(cfg.Name)
 	httpPort := envPort("SERVICE_PORT", 8080)
 	grpcPort := envPort("GRPC_PORT", 9090)
 	httpAddr := fmt.Sprintf(":%d", httpPort)
 	grpcAddr := fmt.Sprintf(":%d", grpcPort)
+	conGRPC := cfg.RegisterGRPC != nil
 
 	httpSrv := &http.Server{Addr: httpAddr, Handler: cfg.Handler}
-
-	grpcSrv := NewGRPCServer(id)
-	hs := health.NewServer()
-	healthpb.RegisterHealthServer(grpcSrv, hs)
-	if cfg.RegisterGRPC != nil {
-		cfg.RegisterGRPC(grpcSrv)
-	}
-	reflection.Register(grpcSrv)
-
-	lis, err := net.Listen("tcp", grpcAddr)
-	if err != nil {
-		return fmt.Errorf("grpc listen %s: %w", grpcAddr, err)
-	}
-
 	errCh := make(chan error, 2)
+
+	var (
+		grpcSrv *grpc.Server
+		hs      *health.Server
+	)
+	if conGRPC {
+		grpcSrv = NewGRPCServer(id)
+		hs = health.NewServer()
+		healthpb.RegisterHealthServer(grpcSrv, hs)
+		cfg.RegisterGRPC(grpcSrv)
+		reflection.Register(grpcSrv)
+
+		lis, err := net.Listen("tcp", grpcAddr)
+		if err != nil {
+			return fmt.Errorf("grpc listen %s: %w", grpcAddr, err)
+		}
+		go func() { errCh <- grpcSrv.Serve(lis) }()
+	}
 	go func() { errCh <- httpSrv.ListenAndServe() }()
-	go func() { errCh <- grpcSrv.Serve(lis) }()
 
 	if err := waitReady(httpAddr, 5*time.Second); err != nil {
 		return err
@@ -83,18 +89,25 @@ func Run(cfg Config) error {
 
 	// El estado del health gRPC sigue a la base de datos.
 	stopHealth := make(chan struct{})
-	go watchHealth(hs, cfg.Ping, stopHealth)
+	if conGRPC {
+		go watchHealth(hs, cfg.Ping, stopHealth)
+	}
 
 	httpReg, err := Register(Spec{Name: cfg.Name, ID: id, Port: httpPort})
 	if err != nil {
 		return err
 	}
-	grpcReg, err := Register(Spec{Name: cfg.Name + "-grpc", ID: id + "-grpc", Port: grpcPort, GRPC: true})
-	if err != nil {
-		httpReg.Deregister()
-		return err
+	var grpcReg *Registration
+	if conGRPC {
+		grpcReg, err = Register(Spec{Name: cfg.Name + "-grpc", ID: id + "-grpc", Port: grpcPort, GRPC: true})
+		if err != nil {
+			httpReg.Deregister()
+			return err
+		}
+		log.Printf("%s: http %s y grpc %s listos", id, httpAddr, grpcAddr)
+	} else {
+		log.Printf("%s: http %s listo", id, httpAddr)
 	}
-	log.Printf("%s: http %s y grpc %s listos", id, httpAddr, grpcAddr)
 
 	var runErr error
 	select {
@@ -106,16 +119,18 @@ func Run(cfg Config) error {
 	httpReg.Deregister()
 	grpcReg.Deregister()
 	close(stopHealth)
-	hs.Shutdown()
 
 	ctx, cancel := shutdownContext()
 	defer cancel()
-	stopped := make(chan struct{})
-	go func() { grpcSrv.GracefulStop(); close(stopped) }()
-	select {
-	case <-stopped:
-	case <-ctx.Done():
-		grpcSrv.Stop()
+	if conGRPC {
+		hs.Shutdown()
+		stopped := make(chan struct{})
+		go func() { grpcSrv.GracefulStop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-ctx.Done():
+			grpcSrv.Stop()
+		}
 	}
 	_ = httpSrv.Shutdown(ctx)
 

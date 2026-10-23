@@ -68,7 +68,7 @@ func (s *Server) Inscribir(ctx context.Context, req *pb.InscribirRequest) (*pb.I
 }
 
 func (s *Server) DarDeBaja(ctx context.Context, req *pb.DarDeBajaRequest) (*pb.DarDeBajaResponse, error) {
-	err := s.Model.Delete(int(req.GetId()))
+	err := s.Service.DarDeBaja(ctx, int(req.GetId()))
 	switch {
 	case err == nil:
 		return &pb.DarDeBajaResponse{}, nil

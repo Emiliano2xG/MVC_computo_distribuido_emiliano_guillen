@@ -89,7 +89,7 @@ func (c *InscripcionController) BajaHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	err = c.InscripcionModel.Delete(id)
+	err = c.Service.DarDeBaja(r.Context(), id)
 	if errors.Is(err, models.ErrYaCursada) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return

@@ -15,6 +15,7 @@ import (
 	"inscripciones/service"
 
 	"horarios/discovery"
+	"horarios/mensajeria"
 	pb "horarios/pb/inscripciones"
 
 	"google.golang.org/grpc"
@@ -77,7 +78,11 @@ func main() {
 		log.Fatal("Failed to create gRPC clients:", err)
 	}
 	defer cl.Close()
-	inscripcionService := service.New(inscripcionModel, cl)
+
+	// Productor Kafka: publica inscripcion.creada / inscripcion.cancelada.
+	productor := mensajeria.NuevoProductor()
+	defer productor.Cerrar()
+	inscripcionService := service.New(inscripcionModel, cl, productor)
 
 	inscripcionController := &controllers.InscripcionController{
 		InscripcionModel: inscripcionModel,

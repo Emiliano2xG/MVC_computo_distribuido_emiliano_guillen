@@ -49,6 +49,14 @@ upstream inscripciones_backend {
 {{- end }}
 }
 
+upstream notificaciones_backend {
+    zone notificaciones_backend 64k;
+{{- range service "notificaciones" }}
+    server {{ .Address }}:{{ .Port }} max_fails=2 fail_timeout=10s;
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
+}
 # ---------------------------------------------------------------------------
 # Upstreams gRPC (puerto 9090 de cada replica). En Consul son los servicios
 # "<nombre>-grpc", con health check del protocolo grpc.health.v1.
@@ -182,6 +190,10 @@ server {
         proxy_pass http://inscripciones_backend;
     }
 
+    location /notificaciones {
+        if ($request_method = OPTIONS) { return 204; }
+        proxy_pass http://notificaciones_backend;
+    }
     location / {
         default_type application/json;
         return 404 '{"error":"ruta no encontrada en el gateway"}';

@@ -74,6 +74,21 @@ func (m *MateriaModel) GetByID(id int) (*Materia, error) {
 	return item, nil
 }
 
+// Ocupacion devuelve la materia con su numero actual de inscritos.
+// sql.ErrNoRows si no existe.
+func (m *MateriaModel) Ocupacion(id int) (*Materia, error) {
+	item := &Materia{}
+	err := m.DB.QueryRow(`
+		SELECT m.id, m.clave, m.nombre, m.cupo,
+		       (SELECT COUNT(*) FROM inscripciones i WHERE i.materia_id = m.id AND i.estado = 'inscrita')
+		FROM materias m WHERE m.id = $1`, id,
+	).Scan(&item.ID, &item.Clave, &item.Nombre, &item.Cupo, &item.Inscritos)
+	if err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
 // PerteneceACarrera dice si la materia esta en el plan de la carrera.
 func (m *MateriaModel) PerteneceACarrera(materiaID int, carreraID int) (bool, error) {
 	var n int

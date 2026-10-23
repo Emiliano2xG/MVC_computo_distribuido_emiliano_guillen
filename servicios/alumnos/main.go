@@ -13,6 +13,7 @@ import (
 	"alumnos/models"
 
 	"horarios/discovery"
+	"horarios/mensajeria"
 	pb "horarios/pb/alumnos"
 
 	"google.golang.org/grpc"
@@ -68,7 +69,11 @@ func main() {
 
 	// Initialize MVC Components
 	alumnoModel := &models.AlumnoModel{DB: db}
-	alumnoController := &controllers.AlumnoController{AlumnoModel: alumnoModel}
+
+	// Productor Kafka: publica alumno.creado en alumnos.eventos.
+	productor := mensajeria.NuevoProductor()
+	defer productor.Cerrar()
+	alumnoController := &controllers.AlumnoController{AlumnoModel: alumnoModel, Productor: productor}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/alumnos", withInstanceHeader(alumnoController.AlumnosHandler))
